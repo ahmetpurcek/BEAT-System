@@ -21,6 +21,9 @@ set(SOURCES
     src/port_scanner.c
     src/gui.c
     src/filter_engine.c
+    src/raw_inject.c
+    src/quic_sni.c
+    src/site_block.c
 )
 
 # Hedef
@@ -34,6 +37,16 @@ target_include_directories(beat_system PRIVATE
 
 # GNU uzantilari (raw soket, getifaddrs vb.)
 target_compile_definitions(beat_system PRIVATE _GNU_SOURCE)
+
+# OpenSSL (QUIC Initial SNI cozumleme; yoksa quic_sni.c fallback'e duser)
+find_package(OpenSSL)
+if(OpenSSL_FOUND)
+    target_compile_definitions(beat_system PRIVATE HAVE_OPENSSL)
+    target_link_libraries(beat_system PRIVATE OpenSSL::Crypto)
+    message(STATUS "OpenSSL bulundu: QUIC SNI cozumleme aktif")
+else()
+    message(STATUS "OpenSSL yok: QUIC SNI cozulemez, ICMP fallback kullanilir")
+endif()
 
 # Derleme bayraklari
 target_compile_options(beat_system PRIVATE

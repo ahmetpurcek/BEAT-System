@@ -10,6 +10,22 @@
 #define MAX_RAW_SIZE    512
 #define MAX_LAYERS      10
 
+/* ===== Site Karartma (per-IP per-site bloklama) için yapısal alanlar =====
+ * Uygulama katmanında görülen alan adı (domain) bu alanlarda YAPISAL olarak
+ * taşınır; böylece hem GUI listeleri hem de site_block motoru tek bir
+ * kaynaktan beslenir. (Eskiden yalnızca info string'ine gömülüyordu.) */
+#define MAX_DOMAIN_LEN  160   /* normalize edilmiş alan adı (küçük harf) */
+#define DNS_MSG_MAX     320   /* ham DNS başlığı + soru bölümü (sinkhole yanıtı) */
+
+/* Alan adının hangi protokol katmanından çıkarıldığı */
+enum {
+    DOMAIN_KIND_NONE = 0,
+    DOMAIN_KIND_DNS  = 1,   /* DNS sorgu adı (udp/53, tcp/53) */
+    DOMAIN_KIND_SNI  = 2,   /* TLS ClientHello SNI (tcp/443, tcp/8443) */
+    DOMAIN_KIND_HTTP = 3,   /* HTTP Host başlığı (tcp/80, tcp/8080) */
+    DOMAIN_KIND_QUIC = 4    /* QUIC Initial içindeki TLS SNI (udp/443) */
+};
+
 
 
 typedef enum {
@@ -51,6 +67,19 @@ typedef struct {
     int layer_count;
     unsigned char raw_data[MAX_RAW_SIZE];
     int raw_len;
+
+    /* ---- Yapısal uygulama katmanı alan adı (site_block) ---- */
+    char          app_domain[MAX_DOMAIN_LEN]; /* küçük harf, son nokta kırpılmış */
+    unsigned char domain_kind;                /* DOMAIN_KIND_* */
+
+    /* ---- TCP başlık alanları (RST enjeksiyonu için) ---- */
+    unsigned int  tcp_seq;
+    unsigned int  tcp_ack;
+    unsigned char tcp_flags;                  /* SYN/ACK/RST/... bit maskesi */
+
+    /* ---- Ham DNS mesajı: başlık + soru bölümü (sinkhole yanıtı üretimi) ---- */
+    unsigned char dns_msg[DNS_MSG_MAX];
+    int           dns_msg_len;
 } PacketRecord;
 
 typedef struct {

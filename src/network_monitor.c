@@ -7,6 +7,8 @@
 #include "network_monitor.h"
 #include "arp_scanner.h"
 #include "network_ids.h"
+#include "site_block.h"
+#include "quic_sni.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -102,6 +104,7 @@ static void dissect_icmp(PacketRecord *pkt, const u_char *data, int len, int bas
 static void dissect_icmpv6(PacketRecord *pkt, const u_char *data, int len, int base_off);
 static void dissect_tcp(PacketRecord *pkt, const u_char *data, int len, int base_off, int ip_payload_len);
 static void dissect_udp(PacketRecord *pkt, const u_char *data, int len, int base_off);
+static void dissect_quic(PacketRecord *pkt, const u_char *data, int len, int base_off);
 static void dissect_dns(PacketRecord *pkt, const u_char *data, int len, int base_off);
 static void dissect_dns_tcp(PacketRecord *pkt, const u_char *data, int len, int base_off);
 static void dissect_http(PacketRecord *pkt, const u_char *data, int len, int base_off);
@@ -453,6 +456,98 @@ static void dissect_icmpv6(PacketRecord *pkt, const u_char *data, int len, int b
     __sync_fetch_and_add(&stats.icmp, 1);
 }
 
+/* ==================================================================
+ *   ALAN ADI (SITE) CIKARIMI YARDIMCILARI
+ *   DNS / TLS-SNI / HTTP-Host / QUIC-SNI katmanlarindan normalize
+ *   edilmis (kucuk harf, nokta kirpilmis) alan adi uretir.
+ * ================================================================== */
+
+/* Kucuk harfe cevir, bastaki/sondaki nokta-bosluk-CR-LF kirp */
+static void domain_normalize(char *s) {
+    if (!s) return;
+    char *p = s;
+    while (*p == '.' || *p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+    if (p != s) memmove(s, p, strlen(p) + 1);
+    size_t n = strlen(s);
+    while (n > 0) {
+        char c = s[n - 1];
+        if (c == '.' || c == ' ' || c == '\t' || c == '\r' || c == '\n') s[--n] = '\0';
+        else break;
+    }
+    for (char *q = s; *q; q++)
+        if (*q >= 'A' && *q <= 'Z') *q = (char)(*q - 'A' + 'a');
+}
+
+/* TLS ClientHello icinden SNI cikar. data = TLS kayit basi (0x16 0x03 ...) */
+static int tls_extract_sni(const u_char *data, int len, char *out, int out_len) {
+    if (!data || !out || out_len <= 1 || len < 9) return 0;
+    if (data[0] != 0x16 || data[1] != 0x03) return 0;
+    int rec_len = (data[3] << 8) | data[4];
+    if (5 + rec_len > len) rec_len = len - 5;
+    const u_char *hs = data + 5;
+    int hs_len = rec_len;
+    if (hs_len < 4 || hs[0] != 0x01) return 0;
+    int ch_len = (hs[1] << 16) | (hs[2] << 8) | hs[3];
+    if (ch_len > hs_len - 4) ch_len = hs_len - 4;
+    const u_char *b = hs + 4;
+    int blen = ch_len;
+    int off = 0;
+    if (blen < 2 + 32 + 1) return 0;
+    off += 2 + 32;
+    int sid = b[off]; off += 1 + sid;
+    if (off + 2 > blen) return 0;
+    int cipher = (b[off] << 8) | b[off + 1]; off += 2 + cipher;
+    if (off + 1 > blen) return 0;
+    int comp = b[off]; off += 1 + comp;
+    if (off + 2 > blen) return 0;
+    int ext_total = (b[off] << 8) | b[off + 1]; off += 2;
+    int ext_end = off + ext_total;
+    if (ext_end > blen) ext_end = blen;
+    while (off + 4 <= ext_end) {
+        int etype = (b[off] << 8) | b[off + 1];
+        int elen  = (b[off + 2] << 8) | b[off + 3];
+        off += 4;
+        if (off + elen > blen) break;
+        if (etype == 0x0000 && elen > 5) {
+            int ntype = b[off + 2];
+            int nlen  = (b[off + 3] << 8) | b[off + 4];
+            if (ntype == 0 && nlen > 0 && 5 + nlen <= elen) {
+                int cp = (nlen < out_len - 1) ? nlen : out_len - 1;
+                memcpy(out, b + off + 5, cp);
+                out[cp] = '\0';
+                domain_normalize(out);
+                return out[0] ? 1 : 0;
+            }
+        }
+        off += elen;
+    }
+    return 0;
+}
+
+/* HTTP istek/yanit icindeki Host basligini bul (buyuk/kucuk harf duyarsiz) */
+static int find_http_host(const u_char *data, int len, char *out, int out_len) {
+    if (!data || !out || out_len <= 1) return 0;
+    for (int i = 0; i + 5 <= len; i++) {
+        if (i != 0 && data[i - 1] != '\n') continue;
+        char c0 = (char)data[i], c1 = (char)data[i + 1], c2 = (char)data[i + 2], c3 = (char)data[i + 3];
+        if ((c0 | 0x20) != 'h' || (c1 | 0x20) != 'o' || (c2 | 0x20) != 's' || (c3 | 0x20) != 't') continue;
+        if (data[i + 4] != ':') continue;
+        int p = i + 5;
+        while (p < len && (data[p] == ' ' || data[p] == '\t')) p++;
+        int e = p;
+        while (e < len && data[e] != '\r' && data[e] != '\n' && data[e] != ':' &&
+               data[e] != ' ' && data[e] != '\t') e++;
+        int hl = e - p;
+        if (hl <= 0) continue;
+        int cp = (hl < out_len - 1) ? hl : out_len - 1;
+        memcpy(out, data + p, cp);
+        out[cp] = '\0';
+        domain_normalize(out);
+        return out[0] ? 1 : 0;
+    }
+    return 0;
+}
+
 /* ---------- TCP ---------- */
 static void dissect_tcp(PacketRecord *pkt, const u_char *data, int len, int base_off, int ip_payload_len) {
     if (len < 20) return;
@@ -465,6 +560,11 @@ static void dissect_tcp(PacketRecord *pkt, const u_char *data, int len, int base
     int flags = off_flags & 0x3F;
     int window = (data[14] << 8) | data[15];
     int payload_len = ip_payload_len - hdr_len;
+
+    /* Site karartma / RST enjeksiyonu icin ham TCP alanlarini sakla */
+    pkt->tcp_seq   = (unsigned int)seq;
+    pkt->tcp_ack   = (unsigned int)ack;
+    pkt->tcp_flags = (unsigned char)flags;
 
     snprintf(pkt->src_port, sizeof(pkt->src_port), "%d", sport);
     snprintf(pkt->dst_port, sizeof(pkt->dst_port), "%d", dport);
@@ -556,6 +656,8 @@ static void dissect_udp(PacketRecord *pkt, const u_char *data, int len, int base
     if (payload_len > 0) {
         if (sport == 53 || dport == 53)
             dissect_dns(pkt, app, payload_len, app_off);
+        else if (sport == 443 || dport == 443)
+            dissect_quic(pkt, app, payload_len, app_off);
         else if (sport == 67 || dport == 67 || sport == 68 || dport == 68)
             dissect_dhcp(pkt, app, payload_len, app_off);
         else if (sport == 137 || dport == 137 || sport == 138 || dport == 138)
@@ -596,8 +698,31 @@ static void dissect_dns(PacketRecord *pkt, const u_char *data, int len, int base
 
     /* İlk sorgu adını çözmeye çalış */
     char qname[256] = "?";
+    int qname_off = -1;
     if (!is_resp && len > 12) {
-        parse_dns_name(qname, sizeof(qname), data, 12, len);
+        qname_off = parse_dns_name(qname, sizeof(qname), data, 12, len);
+    }
+
+    /* Site karartma: yapısal alan adı + sinkhole için ham DNS mesajı */
+    if (!is_resp && qdcount > 0) {
+        char dom[MAX_DOMAIN_LEN];
+        strncpy(dom, qname, sizeof(dom) - 1);
+        dom[sizeof(dom) - 1] = '\0';
+        domain_normalize(dom);
+        if (dom[0] && strcmp(dom, "?") != 0) {
+            strncpy(pkt->app_domain, dom, MAX_DOMAIN_LEN - 1);
+            pkt->app_domain[MAX_DOMAIN_LEN - 1] = '\0';
+            pkt->domain_kind = DOMAIN_KIND_DNS;
+        }
+    }
+    if (!is_resp && qname_off > 0) {
+        int msg_len = qname_off + 4;   /* qname sonu + qtype + qclass */
+        if (msg_len > DNS_MSG_MAX) msg_len = DNS_MSG_MAX;
+        if (msg_len > len) msg_len = len;
+        if (msg_len > 12) {
+            memcpy(pkt->dns_msg, data, msg_len);
+            pkt->dns_msg_len = msg_len;
+        }
     }
 
     strncpy(pkt->protocol, "DNS", sizeof(pkt->protocol) - 1);
@@ -643,6 +768,19 @@ static void dissect_http(PacketRecord *pkt, const u_char *data, int len, int bas
     strncpy(pkt->protocol, "HTTP", sizeof(pkt->protocol) - 1);
     strncpy(pkt->info, line, sizeof(pkt->info) - 1);
 
+    /* Site karartma: Host başlığından yapısal alan adı */
+    {
+        char host[MAX_DOMAIN_LEN];
+        if (find_http_host(data, len, host, sizeof(host)) && host[0]) {
+            strncpy(pkt->app_domain, host, MAX_DOMAIN_LEN - 1);
+            pkt->app_domain[MAX_DOMAIN_LEN - 1] = '\0';
+            pkt->domain_kind = DOMAIN_KIND_HTTP;
+            char tmp[512];
+            snprintf(tmp, sizeof(tmp), "%.300s [Host: %.120s]", pkt->info, host);
+            strncpy(pkt->info, tmp, sizeof(pkt->info) - 1);
+        }
+    }
+
     add_layer(pkt, LAYER_HTTP, "Hypertext Transfer Protocol", line, base_off, len,
               "%s", line);
     __sync_fetch_and_add(&stats.http, 1);
@@ -676,46 +814,37 @@ static void dissect_tls(PacketRecord *pkt, const u_char *data, int len, int base
               "Content Type: %d (%s)\nVersion: %s\nLength: %d", ct, ct_str, vstr, tls_len);
     __sync_fetch_and_add(&stats.tls, 1);
 
-    /* Client Hello / Server Hello içinde SNI varsa */
-    if (ct == 22 && len > 43 && data[5] == 1) { // Handshake: ClientHello
-        int sni_offset = 43 + 32; // skip random + session
-        if (len > sni_offset + 4) {
-            int cipher_len = (data[sni_offset] << 8) | data[sni_offset + 1];
-            sni_offset += 2 + cipher_len;
-            if (len > sni_offset + 2) {
-                int comp_len = data[sni_offset];
-                sni_offset += 1 + comp_len;
-                if (len > sni_offset + 4) {
-                    int ext_len = (data[sni_offset] << 8) | data[sni_offset + 1];
-                    sni_offset += 2;
-                    // extensions içinde SNI (type=0) ara
-                    int ext_end = sni_offset + ext_len;
-                    while (sni_offset + 4 <= ext_end && sni_offset + 4 <= len) {
-                        int ext_type = (data[sni_offset] << 8) | data[sni_offset + 1];
-                        int ext_data_len = (data[sni_offset + 2] << 8) | data[sni_offset + 3];
-                        sni_offset += 4;
-                        if (ext_type == 0 && ext_data_len > 5 && sni_offset + ext_data_len <= len) {
-                            int sni_list_len = (data[sni_offset] << 8) | data[sni_offset + 1];
-                            if (sni_list_len > 3 && sni_offset + 3 + sni_list_len <= len) {
-                                int name_len = (data[sni_offset + 3] << 8) | data[sni_offset + 4];
-                                if (name_len > 0 && sni_offset + 5 + name_len <= len) {
-                                    char sni[256];
-                                    int nlen = (name_len < 255) ? name_len : 255;
-                                    memcpy(sni, data + sni_offset + 5, nlen);
-                                    sni[nlen] = '\0';
-                                    // Info'ya ekle
-                                    char tmp[512];
-                                    snprintf(tmp, sizeof(tmp), "%.250s [SNI: %.250s]", pkt->info, sni);
-                                    strncpy(pkt->info, tmp, sizeof(pkt->info) - 1);
-                                }
-                            }
-                            break;
-                        }
-                        sni_offset += ext_data_len;
-                    }
-                }
-            }
+    /* Client Hello icindeki SNI -> yapısal alan adı (site karartma) */
+    if (ct == 22 && len > 5 && data[5] == 1) {
+        char sni[MAX_DOMAIN_LEN];
+        if (tls_extract_sni(data, len, sni, sizeof(sni)) && sni[0]) {
+            strncpy(pkt->app_domain, sni, MAX_DOMAIN_LEN - 1);
+            pkt->app_domain[MAX_DOMAIN_LEN - 1] = '\0';
+            pkt->domain_kind = DOMAIN_KIND_SNI;
+            char tmp[512];
+            snprintf(tmp, sizeof(tmp), "%.300s [SNI: %.120s]", pkt->info, sni);
+            strncpy(pkt->info, tmp, sizeof(pkt->info) - 1);
         }
+    }
+}
+
+/* ---------- QUIC ---------- */
+static void dissect_quic(PacketRecord *pkt, const u_char *data, int len, int base_off) {
+    strncpy(pkt->protocol, "QUIC", sizeof(pkt->protocol) - 1);
+
+    char sni[MAX_DOMAIN_LEN] = {0};
+    int got = quic_sni_extract(data, len, sni, sizeof(sni));
+    if (got && sni[0]) {
+        strncpy(pkt->app_domain, sni, MAX_DOMAIN_LEN - 1);
+        pkt->app_domain[MAX_DOMAIN_LEN - 1] = '\0';
+        pkt->domain_kind = DOMAIN_KIND_QUIC;
+        snprintf(pkt->info, sizeof(pkt->info), "QUIC Initial [SNI: %.120s]", sni);
+        add_layer(pkt, LAYER_UDP, "QUIC (Initial)", pkt->info, base_off, len,
+                  "SNI: %s", sni);
+    } else {
+        snprintf(pkt->info, sizeof(pkt->info), "QUIC Initial (SNI cozulemedi)");
+        add_layer(pkt, LAYER_UDP, "QUIC (Initial)", pkt->info, base_off, len,
+                  "SNI cozulemedi (OpenSSL yok veya cozulemedi)");
     }
 }
 
@@ -1200,6 +1329,12 @@ static void mirror_init_own_mac(const char *iface) {
         fprintf(stderr, "[FULL_MONITOR] Kendi IP (yerel TX IDS beslemesi): %s\n",
                 g_own_ip_monitor);
     }
+
+    /* Site Karartma motoruna ag baglamini besle: ham enjeksiyon arayuzu,
+     * kendi MAC (kaynak MAC olarak), kendi IP (yerel TX ayirt etmek icin). */
+    if (real && real[0] && strcmp(real, "any") != 0) site_block_set_iface(real);
+    if (g_own_mac_mirror_valid) site_block_set_own_mac(g_own_mac_mirror);
+    if (g_own_ip_monitor_valid) site_block_set_own_ip(g_own_ip_monitor);
 }
 
 /* SPAN/mirror algilama: bize gonderilmeyen (foreign) kareleri say.
@@ -1333,6 +1468,7 @@ int full_monitor_dissect_frame(int datalink_type, const unsigned char *data,
 
 void full_monitor_init(void) {
     if (initialized) return;
+    site_block_init();
     platform_mutex_init(&global_lock);
     memset(packet_buffer, 0, sizeof(packet_buffer));
     memset(&stats, 0, sizeof(stats));
@@ -1350,6 +1486,7 @@ void full_monitor_cleanup(void) {
     if (!initialized) return;
     running = 0;
     platform_sleep_ms(200);
+    site_block_cleanup();
     full_monitor_pcap_record_stop();
     if (g_dump_lock_init) {
         platform_mutex_destroy(&g_dump_lock);
@@ -1406,6 +1543,9 @@ static void handle_packet(const struct pcap_pkthdr *header, const u_char *packet
         act_note(&pkt);
         arp_spoof_note_seen(&pkt);   /* iceride calisma durumu kontrol edilir */
         pcap_dump_record(header, packet);
+        /* Site karartma: kurban (bize ait olmayan) trafigini gozle ve kural
+         * varsa DNS sinkhole / TCP RST ile uygula. */
+        site_block_observe(&pkt);
     }
 
     /* Eğer protokol hâlâ boşsa varsayılan ata */
@@ -2456,6 +2596,8 @@ static void *arp_spoof_loop(void *arg) {
             g_gateway_mac[0], g_gateway_mac[1], g_gateway_mac[2],
             g_gateway_mac[3], g_gateway_mac[4], g_gateway_mac[5]);
     g_gateway_mac_valid = 1;
+    /* Site Karartma: kurban->sunucu yonu RST icin gateway MAC'i kaydet */
+    site_block_set_gateway_mac(g_gateway_mac);
 
     /* IPv6 (NDP) hedefi: gateway link-local adresini coz, raw soket ac */
     if (ndp_resolve_gateway_v6(g_gateway_v6, sizeof(g_gateway_v6)) == 0) {

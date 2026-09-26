@@ -170,6 +170,54 @@ static int g_pkt_filter_active = 0;    /* filtre kutusu odakli mi (metin girisi)
 static int g_nm_hide_own_arp = 1;      /* kendi (spoof) ARP trafigini gizle (varsayilan acik) */
 static int g_pcap_rec_fail = 0;        /* PCAP kayit baslatma hatasi (geri bildirim) */
 
+/* ===== Paket Izleme gorunum tamponu (delta akis) =====
+ * Eski tasarim her 100 ms'de ring'in TAMAMINI (16K x ~14.5 KB ~ 237 MB)
+ * global_lock altinda kopyaliyordu; capture thread'i bloke olup kernel
+ * paket dusuruyor, liste titriyor, sayfa bosaliyor ve sayac geriye
+ * gidiyordu. Yeni tasarim: yalnizca son cekilen paket numarasindan sonra
+ * gelen paketler (delta) kopyalanir; tam yenileme yalnizca nesil/filtre/
+ * hedef degisiminde yapilir. */
+#define NM_DISPLAY_MAX 16384
+#define NM_DELTA_MAX 512
+#define NM_DELTA_BUDGET 2048
+static PacketRecord nm_all_packets[NM_DISPLAY_MAX]; /* tam yenileme ara tamponu */
+static PacketRecord nm_dev_packets[NM_DISPLAY_MAX]; /* gorunum ring'i (kronolojik) */
+static PacketRecord nm_delta_buf[NM_DELTA_MAX];     /* delta cekme tamponu */
+static int nm_dpc = 0;          /* gorunum ring'indeki paket sayisi */
+static int nm_dstart = 0;       /* gorunum ring'inin en eski elemani */
+static int nm_cursor = 0;       /* son gorulen paket numarasi (delta) */
+static unsigned nm_fm_gen = 0; /* son tam yenilemedeki ring nesli */
+static double g_nm_last_refresh = 0.0; /* akis zaman esigi (throttle) */
+
+/* Gorunum ring'indeki i. paket (kronolojik sirada) */
+static PacketRecord *nm_disp_get(int i) {
+  return &nm_dev_packets[(nm_dstart + i) % NM_DISPLAY_MAX];
+}
+
+/* Gorunum ring'ine paket ekle; doluysa en eskiyi at (tail -f semantigi) */
+static void nm_disp_append(const PacketRecord *p) {
+  int w = (nm_dstart + nm_dpc) % NM_DISPLAY_MAX;
+  nm_dev_packets[w] = *p;
+  if (nm_dpc < NM_DISPLAY_MAX)
+    nm_dpc++;
+  else
+    nm_dstart = (nm_dstart + 1) % NM_DISPLAY_MAX;
+}
+
+/* Gorunum filtresi: kendi ARP trafigini gizle + hedef eslesmesi + display filtre */
+static int nm_filter_match(const PacketRecord *p, const char *own_mac,
+                           int have_own_mac) {
+  if (g_nm_hide_own_arp && have_own_mac &&
+      strcmp(p->src_mac, own_mac) == 0)
+    return 0;
+  if (strcmp(p->src_ip, g_nm_target) == 0 ||
+      strcmp(p->dst_ip, g_nm_target) == 0 ||
+      strcmp(p->src_mac, g_nm_target) == 0 ||
+      strcmp(p->dst_mac, g_nm_target) == 0)
+    return filter_engine_packet_matches(p, g_pkt_filter);
+  return 0;
+}
+
 static Font g_custom_font = {0};
 static float g_ui_scale = 1.0f;
 
@@ -362,7 +410,7 @@ static void draw_header(int W) {
   int stx = (int)mon_btn.x - 8 - stw; /* durum yazisinin sol kenari */
   draw_led((float)(stx - 11), 24.0f, 3.5f, stc, monitoring);
   DrawTextC(stt, stx, 19, 8, stc);
-  if (GuiButton(mon_btn, monitoring ? "DURDUR" : "TUM AGI IZLE")) {
+  if (GuiButton(mon_btn, monitoring ? "DURDUR" : "AGI IZLE")) {
     if (monitoring)
       capture_stop_all();
     else
@@ -835,17 +883,18 @@ static void draw_panel_dashboard(int W, int H) {
     }
   }
 
-  /* Orta/Sag panel: cihaz seciliyse detay TUM genisligi alir (aynen);
-   * secili degilse Izleme Listesi + Tarama Kayitlari yan yana. */
+  /* Orta/Sag panel: Izleme Listesi her zaman gorunur kalir. Cihaz seciliyse
+   * detay yalnizca Tarama Kayitlari'nin yerini alir; secili degilse
+   * Izleme Listesi + Tarama Kayitlari yan yana gosterilir. */
   int rx = 12 + list_w + 8;
   int ry = list_y;
   int rh = list_h;
 
+  draw_mon_list_panel(rx, ry, mon_w, rh);
+  int lrx = rx + mon_w + 8;
   if (g_selected_device_ip[0]) {
-    draw_right_panel_device(rx, ry, W - rx - 12, rh);
+    draw_right_panel_device(lrx, ry, W - lrx - 12, rh);
   } else {
-    draw_mon_list_panel(rx, ry, mon_w, rh);
-    int lrx = rx + mon_w + 8;
     draw_right_panel_logs(lrx, ry, W - lrx - 12, rh);
   }
 }
@@ -1273,7 +1322,7 @@ static void draw_panel_security(int W, int H) {
                      ui_alpha(COLOR_GREEN, 24), COLOR_GREEN);
     DrawTextC("Aktif tehdit alarmi yok.", cx - 75, cy + 26, 13, COLOR_GREEN);
     if (!g_ids.running)
-      DrawTextC("IDS pasif — 'Tum Agi Izle' ile ag trafigini analiz edin.",
+      DrawTextC("IDS pasif — 'Agi Izle' ile ag trafigini analiz edin.",
                 cx - 190, cy + 48, 10, COLOR_TEXT_DIM);
     return;
   }
@@ -1490,7 +1539,7 @@ static void draw_panel_tools(int W, int H) {
     DrawRectangleRoundedLinesEx(ip_area, 0.04f, 4, 1.0f,
                                 ui_alpha(COLOR_BORDER, 90));
     int item_h = 20;
-    int ip_rows = g_mon_count + 1; /* +1: "Tum Ag" satiri en ustte */
+    int ip_rows = g_mon_count; /* yalniz izleme listesi; "Tum Ag" satiri kaldirildi */
     float ip_max_scroll = ip_rows * item_h - ip_list_h;
     if (ip_max_scroll < 0)
       ip_max_scroll = 0;
@@ -1502,34 +1551,11 @@ static void draw_panel_tools(int W, int H) {
         g_scroll_nm_devices = ip_max_scroll;
     }
     BeginScissorModeScaled(ip_area.x, ip_area.y, ip_area.width, ip_area.height);
-    /* Satir 0: Tum Ag - hedef filtresi YOK, tum agi goster */
-    {
-      int iy = cy - (int)g_scroll_nm_devices;
-      if (iy + item_h >= cy && iy <= cy + ip_list_h) {
-        Rectangle db = {22, iy + 1, ctrl_w - 44, item_h - 2};
-        int sel = (g_nm_target[0] == '\0');
-        int hov = CheckCollisionPointRec(GetMousePosition(), db);
-        if (sel)
-          DrawRectangleRounded(db, 0.2f, 4, COLOR_SELECTED);
-        else if (hov)
-          DrawRectangleRounded(db, 0.2f, 4, COLOR_PANEL_HOVER);
-        if (sel)
-          DrawRectangle(db.x, db.y + 3, 3, db.height - 6, COLOR_ACCENT);
-        DrawTextC("Tum Ag", db.x + 10, db.y + 4, 10,
-                  sel ? COLOR_ACCENT : COLOR_TEXT);
-        if (hov && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-          /* Tum aga don: hedef filtresi temizlenir, izleme SURUYOR */
-          g_nm_target[0] = '\0';
-          g_selected_packet_num = -1;
-          g_nm_prev_packet_count = 0;
-          g_nm_auto_scroll = 1;
-          g_scroll_nm_flows = 0;
-          g_nm_flow_dirty = 1;
-        }
-      }
-    }
+    /* "Tum Ag" satiri kaldirildi: liste yalnizca izleme listesindeki
+     * cihazlari gosterir. "AGI IZLE" (spoof) yalnizca arka plan
+     * yakalamayi yonetir; paket listesi IP secilinceye kadar bos durur. */
     for (int i = 0; i < g_mon_count; i++) {
-      int iy = cy + (i + 1) * item_h - (int)g_scroll_nm_devices;
+      int iy = cy + i * item_h - (int)g_scroll_nm_devices;
       if (iy + item_h < cy || iy > cy + ip_list_h)
         continue;
       Rectangle db = {22, iy + 1, ctrl_w - 44, item_h - 2};
@@ -1554,8 +1580,8 @@ static void draw_panel_tools(int W, int H) {
       }
     }
     if (g_mon_count == 0)
-      DrawTextC("Liste bos: tum ag paketleri gosterilir.",
-                22, cy + item_h * 2 - 2, 8, ui_alpha(COLOR_TEXT_DIM, 160));
+      DrawTextC("Liste bos: izleme listesine cihaz ekleyin.",
+                22, cy + item_h - 2, 8, ui_alpha(COLOR_TEXT_DIM, 160));
     EndScissorMode();
     draw_custom_scrollbar(ip_area.x + ip_area.width - 10, ip_area.y, 10,
                           ip_list_h, ip_rows * item_h,
@@ -1584,7 +1610,7 @@ static void draw_panel_tools(int W, int H) {
       cy += 20;
     } else {
       /* Izleme pasif: once izleme listesine cihaz eklenmeli */
-      DrawTextC("Izleme pasif - izleme listesine cihaz ekleyin, sonra TUM AGI IZLE.",
+      DrawTextC("Izleme pasif - izleme listesine cihaz ekleyin, sonra AGI IZLE.",
                 24, cy + 4, 9, COLOR_TEXT_DIM);
       cy += 20;
     }
@@ -1702,65 +1728,75 @@ static void draw_panel_tools(int W, int H) {
     }
 
     /* --- Yakalanan paket ozeti --- */
-    static PacketRecord nm_all_packets[4096];
-    static PacketRecord nm_dev_packets[2048];
-    static int nm_dpc = 0;
+    /* Gorunum tamponu ve yardimcilar dosya kapsaminda tanimli (yukarida):
+     * delta akis + tam yenileme karari orada yonetilir. */
 
     /* Kendi (spoof) ARP trafigini gizleme icin kendi MAC'imiz */
     char own_mac_buf[MAX_MAC_LEN] = "";
     int have_own_mac =
         (full_monitor_own_mac(own_mac_buf, sizeof(own_mac_buf)) == 0);
 
-    int c0 = 0;
-    /* Durdur tusu akisi dondurur: kilitliyken yalnizca dirty=1 ise bir kez
-     * yenile; diger karelerde ring buffer'a dokunulmaz. */
-    if (show_packets && (!g_nm_flow_paused || g_nm_flow_dirty)) {
-      g_nm_flow_dirty = 0;
-      nm_dpc = 0;
-      int c = full_monitor_get_packets(nm_all_packets, 4096, 0);
-      c0 = c;
-      /* Display filtre ifadesi de uygulanir (Wireshark tarzi) */
-      if (!g_nm_target[0]) {
-        /* Hedef secilmemis: tum ag, IP filtresi yok. En YENI 2048 eslesme
-         * kalsin: sondan basa topla, sonra kronolojik siraya dondur. */
-        for (int i = c - 1; i >= 0 && nm_dpc < 2048; i--) {
-          if (g_nm_hide_own_arp && have_own_mac &&
-              strcmp(nm_all_packets[i].src_mac, own_mac_buf) == 0)
-            continue;
-          /* Izleme listesi kapsami: iki uc da listede yoksa gosterme.
-           * BOS liste = kapsam yok -> hicbir paket gosterilmez. */
-          if (!mon_list_has(nm_all_packets[i].src_ip) &&
-              !mon_list_has(nm_all_packets[i].dst_ip))
-            continue;
-          if (filter_engine_packet_matches(&nm_all_packets[i], g_pkt_filter))
-            nm_dev_packets[nm_dpc++] = nm_all_packets[i];
-        }
-        for (int a = 0, b = nm_dpc - 1; a < b; a++, b--) {
-          PacketRecord t = nm_dev_packets[a];
-          nm_dev_packets[a] = nm_dev_packets[b];
-          nm_dev_packets[b] = t;
-        }
-      } else {
-        /* Secili hedef IP eslesmeleri: En YENI 2048 eslesme kalsin */
-        for (int i = c - 1; i >= 0 && nm_dpc < 2048; i--) {
-          if (g_nm_hide_own_arp && have_own_mac &&
-              strcmp(nm_all_packets[i].src_mac, own_mac_buf) == 0)
-            continue;
-          if ((strcmp(nm_all_packets[i].src_ip, g_nm_target) == 0 ||
-               strcmp(nm_all_packets[i].dst_ip, g_nm_target) == 0 ||
-               strcmp(nm_all_packets[i].src_mac, g_nm_target) == 0 ||
-               strcmp(nm_all_packets[i].dst_mac, g_nm_target) == 0) &&
-              filter_engine_packet_matches(&nm_all_packets[i], g_pkt_filter)) {
-            nm_dev_packets[nm_dpc++] = nm_all_packets[i];
+    int c0 = full_monitor_packet_count(); /* ring'deki mevcut paket sayisi */
+    /* Akis yenileme: pcap modunda (mode==2) yalnizca DELTA paketler kopyalanir
+     * (kucuk, kilit kisa); tam yenileme yalnizca nesil degisimi, filtre/hedef
+     * degisimi veya duraklatma/resume'de yapilir. Fallback modda (mode==1)
+     * eski 10 Hz tam yenileme korunur (procnet ring'i 2 sn'de sifirlanir,
+     * delta guvenilmez).
+     * DURDUR tusu akisi dondurur (yakalama arka planda surer): kilitliyken
+     * yalnizca dirty=1 ise bir kez yenilenir, diger karelerde gorunum
+     * ring'ine dokunulmaz; Devam Et dirty=1 ile tam yenileme yapar. */
+    int nm_do_full = 0;
+    if (show_packets && g_nm_target[0]) {
+      unsigned gencur = full_monitor_generation();
+      if (gencur != nm_fm_gen) {
+        g_nm_flow_dirty = 1;
+        nm_fm_gen = gencur;
+      }
+      int mode = full_monitor_get_mode();
+      double nowt = GetTime();
+      if (mode == 2 && !g_nm_flow_dirty && !g_nm_flow_paused) {
+        /* Surekli delta akisi: kare basina NM_DELTA_BUDGET pakete kadar */
+        int budget = NM_DELTA_BUDGET;
+        while (budget > 0) {
+          int want = (budget < NM_DELTA_MAX) ? budget : NM_DELTA_MAX;
+          int got = full_monitor_get_new_packets(&nm_cursor, nm_delta_buf, want);
+          if (got <= 0) break;
+          for (int i = 0; i < got; i++) {
+            if (nm_filter_match(&nm_delta_buf[i], own_mac_buf, have_own_mac))
+              nm_disp_append(&nm_delta_buf[i]);
           }
+          budget -= got;
         }
-        /* Kronolojik siraya dondur (eski->yeni, auto-scroll en altta yeni) */
-        for (int a = 0, b = nm_dpc - 1; a < b; a++, b--) {
-          PacketRecord t = nm_dev_packets[a];
-          nm_dev_packets[a] = nm_dev_packets[b];
-          nm_dev_packets[b] = t;
+        g_nm_last_refresh = nowt;
+      } else if ((mode != 0 || g_nm_flow_dirty) &&
+                 (!g_nm_flow_paused || g_nm_flow_dirty)) {
+        /* Tam yenileme: throttle 0.1 sn (fallback modda eski davranis).
+         * Duraklatilmis akis yalnizca dirty'de tek seferlik yenilenir. */
+        if (g_nm_flow_dirty ||
+            (!g_nm_flow_paused && (nowt - g_nm_last_refresh) >= 0.1)) {
+          nm_do_full = 1;
+          g_nm_last_refresh = nowt;
         }
       }
+      /* mode==0 (kapali) veya duraklatilmis ve !dirty: donmus gorunum */
+    } else {
+      nm_dpc = 0;
+      nm_dstart = 0;
+      nm_cursor = 0;
+      g_nm_flow_dirty = 1; /* sekme tekrar acilinca tam yenileme */
+    }
+    if (nm_do_full) {
+      g_nm_flow_dirty = 0;
+      nm_dpc = 0;
+      nm_dstart = 0;
+      int c = full_monitor_get_packets(nm_all_packets, NM_DISPLAY_MAX, 0);
+      /* Kronolojik (eski->yeni) tara; eslesenleri gorunum ring'ine ekle.
+       * Ring tasarsa en yeni NM_DISPLAY_MAX eslesme kalir. */
+      for (int i = 0; i < c; i++) {
+        if (nm_filter_match(&nm_all_packets[i], own_mac_buf, have_own_mac))
+          nm_disp_append(&nm_all_packets[i]);
+      }
+      nm_cursor = (c > 0) ? nm_all_packets[c - 1].packet_number : 0;
     }
 
     if (show_packets) {
@@ -1847,9 +1883,10 @@ static void draw_panel_tools(int W, int H) {
     if (g_nm_target[0]) {
       snprintf(buf, sizeof(buf), "Trafik: %s", g_nm_target);
       draw_panel_title(rx + 12, py + 8, buf, 13, COLOR_ACCENT);
-    } else if (g_capture_all) {
-      draw_panel_title(rx + 12, py + 8, "Trafik: Tum Ag", 13, COLOR_ACCENT);
     } else {
+      /* Hedef secilmeden liste akmaz; baslik da "Paket Listesi" kalir.
+       * Spoof/tum-ag durumu sol paneldeki "Trafik Izleniyor" satiriyla
+       * aynen gorunur. */
       draw_panel_title(rx + 12, py + 8, "Paket Listesi", 13, COLOR_ACCENT);
     }
     /* SPAN / port mirror tespiti: yabanci MAC kaynakli kareler yuksekse uyar */
@@ -1942,7 +1979,9 @@ static void draw_panel_tools(int W, int H) {
 
       if (nm_dpc == 0) {
         const char *msg;
-        if (!capture_for_this)
+        if (!g_nm_target[0])
+          msg = "Bir hedef IP secin."; /* Port Tarayici davranisi: once hedef */
+        else if (!capture_for_this)
           msg = "Izleme baslatilmadi.";
         else if (g_pkt_filter[0])
           msg = "Filtreye uyan paket yok.";
@@ -1956,6 +1995,10 @@ static void draw_panel_tools(int W, int H) {
         float ms = nm_dpc * 18 - lh;
         if (ms < 0)
           ms = 0;
+        /* Liste kisalirsa (filtre/tam yenileme) scroll ust siniri asili
+         * kalmasin: aksi halde gorunum bos sayfa gosterir. */
+        if (g_scroll_nm_flows > ms)
+          g_scroll_nm_flows = ms;
 
         /* Wireshark tarzi auto-scroll: eger kullanici en alttaysa yeni
            paketler geldiginde otomatik asagiya kaydir */
@@ -1987,7 +2030,7 @@ static void draw_panel_tools(int W, int H) {
           int iy = tbl_y + i * 18 - (int)g_scroll_nm_flows;
           if (iy + 18 < tbl_y || iy > tbl_y + lh)
             continue;
-          PacketRecord *p = &nm_dev_packets[i];
+          PacketRecord *p = nm_disp_get(i);
 
           Rectangle pr = {rx + 4, iy, result_w - 24, 17};
           int hover = CheckCollisionPointRec(GetMousePosition(), pr);
@@ -2054,8 +2097,8 @@ static void draw_panel_tools(int W, int H) {
     else {
       PacketRecord *sel_p = NULL;
       for (int i = 0; i < nm_dpc; i++) {
-        if (nm_dev_packets[i].packet_number == g_selected_packet_num) {
-          sel_p = &nm_dev_packets[i];
+        if (nm_disp_get(i)->packet_number == g_selected_packet_num) {
+          sel_p = nm_disp_get(i);
           break;
         }
       }

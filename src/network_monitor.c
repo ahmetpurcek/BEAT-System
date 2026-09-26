@@ -36,7 +36,7 @@ static platform_mutex_t global_lock;
 static int g_capture_mode = 0;
 
 /* ---- CIRCULAR PACKET BUFFER (tüm paketler sırayla) ---- */
-#define PACKET_BUFFER_SIZE 10000
+#define PACKET_BUFFER_SIZE 50000
 static PacketRecord packet_buffer[PACKET_BUFFER_SIZE];
 static int write_idx = 0;       /* sonraki yazılacak slot (mod PACKET_BUFFER_SIZE) */
 static int packet_count = 0;    /* buffer'daki gerçek paket sayısı (max PACKET_BUFFER_SIZE) */
@@ -1414,6 +1414,12 @@ static void handle_packet(const struct pcap_pkthdr *header, const u_char *packet
         strncpy(pkt.info, "Ethernet frame", sizeof(pkt.info) - 1);
     }
 
+    /* MITM relay kopyalari (kaynak MAC bizim ama kaynak IP kurban) GUI
+     * ring'ine girmez: bunlar gercek yeni paket degil, bizim ilerlettigimiz
+     * kopyalardir. Sayac (total_captured) da artmaz -> paket numaralari
+     * surekli kalir ve listede fazla/sahte paket gorunmez. */
+    if (own_src && !own_local_out) return;
+
     /* Buffer'a ekle (thread-safe) */
     platform_mutex_lock(&global_lock);
     packet_buffer[write_idx] = pkt;
@@ -1858,6 +1864,10 @@ int full_monitor_get_mode(void) {
     return g_capture_mode;
 }
 
+/* Ring icerigi degistiginde artan nesil sayaci: GUI, tam yenileme
+ * (full refresh) gerekip gerekmedigini bu sayacla anlar. */
+static unsigned g_fm_gen = 0;
+
 void full_monitor_clear(void) {
     if (!initialized) return;
     platform_mutex_lock(&global_lock);
@@ -1871,6 +1881,7 @@ void full_monitor_clear(void) {
     g_act_head = 0;
     g_act_count = 0;
     memset(g_act_ring, 0, sizeof(g_act_ring));
+    g_fm_gen++;  /* ring tamamen degisti -> GUI tam yenileme yapmali */
     platform_mutex_unlock(&global_lock);
 }
 
@@ -1890,6 +1901,78 @@ int full_monitor_get_packets(PacketRecord *out, int max_count, int offset) {
     }
     platform_mutex_unlock(&global_lock);
     return count;
+}
+
+/* Delta (fark) cekme: GUI her karede TUM ringi kopyalamak yerine yalnizca
+ * son cekilen paket numarasindan (cursor) sonra gelen paketleri alir.
+ * Boylece 100 ms'de 16K paket kopyalanmaz; capture thread'i kilit altinda
+ * bekletilmez ve kernel paket dusurmaz. Ring tasarsa (cursor eski kaldi)
+ * geriye dogru tarama ile en yeni max_count paket doldurulur.
+ *
+ * @param cursor   giris: son gorulen paket numarasi; cikis: yeni son numara
+ * @param out      cikti tamponu (kronolojik sirada, eski->yeni)
+ * @param max_count en fazla kac paket doldurulacak
+ * @return yazilan paket sayisi (0 = yeni paket yok) */
+int full_monitor_get_new_packets(int *cursor, PacketRecord *out, int max_count) {
+    if (!out || max_count <= 0 || !cursor) return 0;
+    platform_mutex_lock(&global_lock);
+    int avail = packet_count;
+    if (avail <= 0) {
+        platform_mutex_unlock(&global_lock);
+        return 0;
+    }
+    int oldest_num = packet_buffer[write_idx].packet_number; /* ring'in en eskisi */
+    int newest_idx = (write_idx - 1 + PACKET_BUFFER_SIZE) % PACKET_BUFFER_SIZE;
+    int newest_num = packet_buffer[newest_idx].packet_number;
+    int cur = *cursor;
+    /* cursor'u gecerli araliga kilitle: [oldest_num-1, newest_num] */
+    if (cur < oldest_num - 1) cur = oldest_num - 1;
+    if (cur > newest_num) cur = newest_num;
+    int want = newest_num - cur;               /* beklenen yeni paket sayisi */
+    if (want > max_count) want = max_count;    /* cikti tamponunu asma */
+    if (want <= 0) {
+        *cursor = newest_num;
+        platform_mutex_unlock(&global_lock);
+        return 0;
+    }
+    /* Beklenen baslangic indeksi: cur+1 numarali paketin yeri */
+    int start = (write_idx - avail + (cur + 1 - oldest_num)) % PACKET_BUFFER_SIZE;
+    if (start < 0) start += PACKET_BUFFER_SIZE;
+    int n = 0;
+    if (packet_buffer[start].packet_number == cur + 1) {
+        /* Surekli aralik: dogrudan kopyala (kronolojik) */
+        for (int i = 0; i < want; i++) {
+            out[n++] = packet_buffer[(start + i) % PACKET_BUFFER_SIZE];
+        }
+    } else {
+        /* Ring tasmis / numara kopmus: en yeni want paketi geriye dogru
+         * tara, sonra kronolojik siraya cevir. */
+        int found = 0;
+        for (int k = 0; k < avail && found < want; k++) {
+            PacketRecord *q = &packet_buffer[(newest_idx - k + PACKET_BUFFER_SIZE) % PACKET_BUFFER_SIZE];
+            if (q->packet_number > 0) out[found++] = *q;
+        }
+        for (int a = 0, b = found - 1; a < b; a++, b--) {
+            PacketRecord t = out[a]; out[a] = out[b]; out[b] = t;
+        }
+        n = found;
+    }
+    *cursor = newest_num;
+    platform_mutex_unlock(&global_lock);
+    return n;
+}
+
+/* Ring'deki mevcut paket sayisi (kilitli okuma) */
+int full_monitor_packet_count(void) {
+    platform_mutex_lock(&global_lock);
+    int c = packet_count;
+    platform_mutex_unlock(&global_lock);
+    return c;
+}
+
+/* Ring nesli: full_monitor_clear sonrasi degisir; GUI tam yenileme karari verir */
+unsigned full_monitor_generation(void) {
+    return g_fm_gen;
 }
 
 int full_monitor_get_filtered(PacketRecord *out, int max_count, const char *filter_proto) {

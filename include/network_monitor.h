@@ -74,6 +74,14 @@ int  full_monitor_get_mode(void);  /* 0=kapalı, 1=procfs fallback, 2=pcap */
 void full_monitor_clear(void);
 int  full_monitor_get_packets(PacketRecord *out, int max_count, int offset);
 int  full_monitor_get_filtered(PacketRecord *out, int max_count, const char *filter_proto);
+/* Delta cekme: cursor'dan sonra gelen yeni paketleri dondurur (kronolojik).
+ * Ring tasarsa en yeni max_count paket doldurulur. cursor giris/cikis olarak
+ * kullanilir (son gorulen paket numarasi). */
+int  full_monitor_get_new_packets(int *cursor, PacketRecord *out, int max_count);
+/* Ring'deki mevcut paket sayisi (kilitli okuma) */
+int  full_monitor_packet_count(void);
+/* Ring nesli: full_monitor_clear sonrasi degisir; GUI tam yenileme karari verir */
+unsigned full_monitor_generation(void);
 void full_monitor_get_stats(FullStats *s);
 
 /* Yardımcı */

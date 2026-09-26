@@ -1,8 +1,8 @@
 /*
- * gui.h — raylib GUI Modülü (v3 — CyberSOC Siyah Tema)
+ * gui.h — raylib GUI Modülü (v3 — BEAT System Siyah Tema)
  *
- * Akilli Sehir Guvenlik Merkezi arayuzu. v3 tasarimi:
- *  - Saf siyah zemin + neon cyan aksan (SOC / NOC gorunumu)
+ * BEAT System arayuzu. v3 tasarimi:
+ *  - Saf siyah zemin + neon cyan aksan (NOC gorunumu)
  *  - Tabs: Kontrol Paneli / Alarm Merkezi / Araclar
  *  - Tum backend yuzeyi cizilir: ag taramasi, IDS alarmlari,
  *    paket yakalama (Wireshark-tarzi PDU + hex), port taramasi + CVE.
@@ -12,7 +12,7 @@
 #include "raylib.h"
 
 /* ============================================================
- * CyberSOC Paleti — siyah ana renk, neon cyan/yesil aksanlar
+ * BEAT System Paleti — siyah ana renk, neon cyan/yesil aksanlar
  * ============================================================ */
 
 /* Zeminler (saf siyah -> panel grileri) */
@@ -31,6 +31,11 @@
 #define COLOR_GREEN         (Color){  52, 211, 153, 255 } /* emerald   */
 #define COLOR_AMBER         (Color){ 251, 191,  36, 255 } /* amber     */
 #define COLOR_RED           (Color){ 248, 113, 113, 255 } /* soft red  */
+
+/* Onem derecesi gradyani (birbirinden AYIRT EDILEBILIR olmali):
+ * KRITIK=kirmizi, YUKSEK=turuncu, ORTA=sari, DUSUK=yesil. */
+#define COLOR_ORANGE        (Color){ 249, 115,  22, 255 } /* turuncu (YUKSEK) */
+#define COLOR_YELLOW        (Color){ 250, 211,  21, 255 } /* sari    (ORTA)   */
 #define COLOR_CYAN          (Color){ 125, 224, 255, 255 } /* acik cyan */
 
 /* Metin */

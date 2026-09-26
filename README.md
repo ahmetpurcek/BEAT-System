@@ -1,7 +1,7 @@
-# Siber Güvenlik Merkezi
+# BEAT System
 
-> Raylib tabanlı, tek pencereden ağ keşfi, port taraması, canlı trafik izleme ve saldırı tespiti (IDS) sunan C11 güvenlik aracı.  
-> **Sadece Linux üzerinde çalışır.** (Arch, BlackArch, Kali, Parrot, Ubuntu/Debian, Fedora)
+> Raylib tabanlı, tek pencereden ağ keşfi, port taraması, canlı trafik izleme ve saldırı tespiti (IDS) sunan C11 güvenlik aracı.
+> **Hedef platform: Kali Linux (x86_64)**
 
 ---
 
@@ -20,219 +20,50 @@
 
 ---
 
-## 🖥️ Sistem Gereksinimleri
-
-- **İşletim Sistemi:** Linux (kernel 5.4+)
-- **Mimari:** x86\_64
-- **Root yetkisi:** Bazı tarama modları ve libpcap yakalama için zorunlu
-- **Ekran:** OpenGL 2.1+ destekli GPU / X11 veya Wayland oturumu
-
-### Yazılım Gereksinimleri
-
-| Bileşen | Minimum Sürüm |
-|---|---|
-| GCC veya Clang | GCC 9+ / Clang 10+ |
-| CMake | 3.16+ |
-| pkg-config | Herhangi |
-| raylib | 4.5+ |
-| libpcap | 1.9+ |
-| OpenGL geliştirme başlıkları | — |
-| X11 geliştirme başlıkları | — |
-
----
-
-## 📦 Dağıtıma Göre Bağımlılık Kurulumu
-
-> ⚠️ **Önemli:** `raylib` paket adı ve sürümü dağıtımlar arasında önemli farklılıklar gösterebilir.  
-> Hangi dağıtımı kullandığınızı aşağıdan bulun ve sırasıyla uygulayın.
-
----
-
-### 🔷 Arch Linux / BlackArch / Manjaro
-
-BlackArch ve Arch aynı `pacman` paket yöneticisini kullanır.
-
-```bash
-# 1. Paket listesini güncelle
-sudo pacman -Syu
-
-# 2. Derleme araçları + bağımlılıklar
-sudo pacman -S --needed \
-    base-devel \
-    cmake \
-    pkgconf \
-    raylib \
-    libpcap \
-    mesa \
-    libx11 \
-    libxrandr \
-    libxinerama \
-    libxcursor \
-    libxi \
-    glfw-x11
-```
-
-> 💡 Wayland kullanıyorsanız `glfw-x11` yerine `glfw-wayland` kurun:
-> ```bash
-> sudo pacman -S glfw-wayland
-> ```
-
----
-
-### 🔷 Kali Linux / Parrot OS (Debian tabanlı)
+## 📦 Bağımlılık Kurulumu (Kali Linux)
 
 ```bash
 # 1. Paket listesini güncelle
 sudo apt update && sudo apt upgrade -y
 
 # 2. Derleme araçları
-sudo apt install -y \
-    build-essential \
-    cmake \
-    pkg-config \
-    git
+sudo apt install -y build-essential cmake pkg-config git
 
 # 3. libpcap
 sudo apt install -y libpcap-dev
 
 # 4. OpenGL ve X11 başlıkları (Raylib için zorunlu)
-sudo apt install -y \
-    libgl1-mesa-dev \
-    libgles2-mesa-dev \
-    libx11-dev \
-    libxrandr-dev \
-    libxinerama-dev \
-    libxcursor-dev \
-    libxi-dev \
-    libxext-dev \
-    libwayland-dev \
-    libxkbcommon-dev
+sudo apt install -y libgl1-mesa-dev libgles2-mesa-dev \
+    libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev \
+    libxi-dev libxext-dev
 
-# 5. Raylib
-#    Kali/Parrot depolarında raylib olmayabilir. Önce deneyin:
-sudo apt install -y libraylib-dev 2>/dev/null || \
-    echo "libraylib-dev bulunamadı — aşağıdaki 'Raylib Kaynak Koddan Derleme' bölümüne geçin"
-```
-
----
-
-### 🔷 Ubuntu 22.04 / 24.04 / Linux Mint
-
-```bash
-sudo apt update && sudo apt upgrade -y
-
-sudo apt install -y \
-    build-essential \
-    cmake \
-    pkg-config \
-    libpcap-dev \
-    libgl1-mesa-dev \
-    libgles2-mesa-dev \
-    libx11-dev \
-    libxrandr-dev \
-    libxinerama-dev \
-    libxcursor-dev \
-    libxi-dev \
-    libxext-dev \
-    libwayland-dev \
-    libxkbcommon-dev
-
-# Ubuntu 24.04+: raylib resmi depoda mevcut
+# 5. Raylib — Kali deposunda varsa:
 sudo apt install -y libraylib-dev
 
-# Ubuntu 22.04 / Linux Mint: raylib paketi yoksa kaynak koddan derleyin
-# (Aşağıdaki bölüme bakın)
-```
-
----
-
-### 🔷 Fedora / RHEL / Rocky Linux
-
-```bash
-# 1. Güncelle
-sudo dnf upgrade -y
-
-# 2. Geliştirme araçları grubu
-sudo dnf groupinstall -y "Development Tools"
-
-# 3. Bağımlılıklar
-sudo dnf install -y \
-    cmake \
-    pkgconf-pkg-config \
-    libpcap-devel \
-    mesa-libGL-devel \
-    mesa-libGLES-devel \
-    libX11-devel \
-    libXrandr-devel \
-    libXinerama-devel \
-    libXcursor-devel \
-    libXi-devel \
-    libXext-devel \
-    wayland-devel \
-    libxkbcommon-devel
-
-# 4. Raylib Fedora depolarında bulunmaz → kaynak koddan derleme gerekir
-# (Aşağıdaki bölüme bakın)
-```
-
----
-
-### 🔧 Raylib Kaynak Koddan Derleme (Evrensel Yöntem)
-
-Paket deposunda raylib yoksa veya sürüm çok eskiyse bu yöntemi kullanın.  
-**Her dağıtımda çalışır.**
-
-```bash
-# 1. Kaynak kodu indir
+# Depoda yoksa (hata alırsanız) kaynak koddan derleyin:
 git clone --depth 1 --branch 5.0 https://github.com/raysan5/raylib.git /tmp/raylib-src
 cd /tmp/raylib-src
-
-# 2. Derle ve sisteme kur
 mkdir build && cd build
-cmake .. \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DBUILD_SHARED_LIBS=ON \
-    -DWITH_PIC=ON
+cmake .. -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DWITH_PIC=ON
 make -j$(nproc)
 sudo make install
-
-# 3. Kütüphane önbelleğini güncelle
 sudo ldconfig
-
-# 4. Kurulumu doğrula
-pkg-config --modversion raylib
-# Beklenen çıktı: 5.0.0
+cd ~
 ```
 
-> Eğer `pkg-config` raylib'i hâlâ bulamazsa:
-> ```bash
-> export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH
-> # Kalıcı yapmak için:
-> echo 'export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH' >> ~/.bashrc
-> source ~/.bashrc
-> ```
+> 💡 Kurulumu doğrulamak için: `pkg-config --modversion raylib` → `5.0.0` gibi bir sürüm döndürmeli.
 
 ---
 
 ## 🚀 Derleme
 
-Tüm bağımlılıklar kurulduktan sonra proje kökünden:
-
 ```bash
-# 1. Build dizinini oluştur ve yapılandır
+# Proje kökünde:
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-
-# 2. Derle (tüm CPU çekirdeklerini kullan)
 cmake --build build -j$(nproc)
 ```
 
-Başarılı derleme çıktısı:
-```
-[100%] Linking C executable guvenlik_merkezi
-[100%] Built target guvenlik_merkezi
-```
-
-Çalıştırılabilir dosya: `build/guvenlik_merkezi`
+Çalıştırılabilir dosya: `build/beat_system`
 
 ---
 
@@ -241,7 +72,7 @@ Başarılı derleme çıktısı:
 ### Normal mod
 
 ```bash
-./build/guvenlik_merkezi
+./build/beat_system
 ```
 
 ### Root modu — tam özellik seti (önerilen)
@@ -249,148 +80,24 @@ Başarılı derleme çıktısı:
 SYN/FIN/Xmas raw taramaları, ARP black-hole ve libpcap yakalama **root yetkisi gerektirir**.
 
 ```bash
-# X11 display iznini ver (sudo ile GUI açmak için zorunlu)
-xhost +local:root
-
-# Root olarak çalıştır
-sudo ./build/guvenlik_merkezi
-
-# İşlem bitince izni geri al (güvenlik)
-xhost -local:root
-```
-
-### Wayland oturumunda root modu
-
-```bash
-# Oturum tipini kontrol et
-echo $XDG_SESSION_TYPE   # "wayland" çıktısı veriyorsa:
-
-sudo WAYLAND_DISPLAY=$WAYLAND_DISPLAY \
-     XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR \
-     ./build/guvenlik_merkezi
+xhost +local:root          # X11 display izni (sudo ile GUI açmak için)
+sudo ./build/beat_system
+xhost -local:root          # işlem bitince izni geri al
 ```
 
 ---
 
 ## 🧪 Testler
 
-### Display Filtre Motoru Birim Testi (138 test)
-
 ```bash
-gcc -std=c11 -D_GNU_SOURCE \
-    -Iinclude \
-    tests/filter_engine_test.c \
-    src/filter_engine.c \
-    src/utils.c \
-    -o /tmp/fetest && /tmp/fetest
-```
+# Display Filtre Motoru (138 test)
+gcc -std=c11 -D_GNU_SOURCE -Iinclude tests/filter_engine_test.c src/filter_engine.c src/utils.c -o /tmp/fetest && /tmp/fetest
 
-### LAN Akış Testi
+# LAN Akış Testi
+gcc -std=c11 -D_GNU_SOURCE -Iinclude tests/lan_flow_test.c src/filter_engine.c src/utils.c -o /tmp/lantest && /tmp/lantest
 
-```bash
-gcc -std=c11 -D_GNU_SOURCE \
-    -Iinclude \
-    tests/lan_flow_test.c \
-    src/filter_engine.c \
-    src/utils.c \
-    -o /tmp/lantest && /tmp/lantest
-```
-
-### Monitor/Ayrıştırma Testi
-
-```bash
-gcc -std=c11 -D_GNU_SOURCE \
-    -Iinclude \
-    tests/monitor_dissect_test.c \
-    src/filter_engine.c \
-    src/utils.c \
-    -o /tmp/montest && /tmp/montest
-```
-
----
-
-## 🛠️ Sık Karşılaşılan Hatalar ve Çözümleri
-
-### ❌ `Could not find raylib` (CMake hatası)
-
-```
--- Could NOT find raylib (missing: RAYLIB_LIBRARIES)
-```
-
-**Çözüm:**
-```bash
-pkg-config --modversion raylib          # sürümü kontrol et
-export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH
-sudo ldconfig
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release   # tekrar dene
-```
-
----
-
-### ❌ `pcap.h: No such file or directory`
-
-| Dağıtım | Komut |
-|---|---|
-| Arch/BlackArch | `sudo pacman -S libpcap` |
-| Debian/Kali/Ubuntu | `sudo apt install libpcap-dev` |
-| Fedora | `sudo dnf install libpcap-devel` |
-
----
-
-### ❌ `GL/gl.h: No such file or directory`
-
-| Dağıtım | Komut |
-|---|---|
-| Arch/BlackArch | `sudo pacman -S mesa` |
-| Debian/Kali/Ubuntu | `sudo apt install libgl1-mesa-dev libgles2-mesa-dev` |
-| Fedora | `sudo dnf install mesa-libGL-devel` |
-
----
-
-### ❌ `X11/Xlib.h: No such file or directory`
-
-| Dağıtım | Komut |
-|---|---|
-| Arch/BlackArch | `sudo pacman -S libx11 libxrandr libxinerama libxcursor libxi` |
-| Debian/Kali/Ubuntu | `sudo apt install libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev` |
-| Fedora | `sudo dnf install libX11-devel libXrandr-devel libXinerama-devel libXcursor-devel libXi-devel` |
-
----
-
-### ❌ GUI açılmıyor / `cannot open display`
-
-```bash
-xhost +local:root
-sudo ./build/guvenlik_merkezi
-```
-
----
-
-### ❌ `error while loading shared libraries: libraylib.so`
-
-```bash
-sudo ldconfig
-# Hâlâ hata alıyorsanız:
-echo "/usr/local/lib" | sudo tee /etc/ld.so.conf.d/raylib.conf
-sudo ldconfig
-```
-
----
-
-### ❌ CMake sürümü çok eski (3.16 altı)
-
-```bash
-# Arch
-sudo pacman -S cmake
-
-# Debian/Kali/Ubuntu — Kitware resmi deposu
-wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc | sudo apt-key add -
-sudo apt-add-repository 'deb https://apt.kitware.com/ubuntu/ focal main'
-sudo apt install cmake
-
-# pip ile (herhangi bir dağıtım)
-pip3 install cmake --user
-export PATH="$HOME/.local/bin:$PATH"
+# Monitor/Ayrıştırma Testi
+gcc -std=c11 -D_GNU_SOURCE -Iinclude tests/monitor_dissect_test.c src/filter_engine.c src/utils.c -o /tmp/montest && /tmp/montest
 ```
 
 ---
@@ -398,7 +105,7 @@ export PATH="$HOME/.local/bin:$PATH"
 ## 📁 Proje Yapısı
 
 ```
-cysec-project/
+BEAT-System/
 ├── CMakeLists.txt              # Bağımlılıklar ve derleme yapılandırması
 ├── README.md                   # Bu dosya
 ├── include/                    # Başlık dosyaları
@@ -436,8 +143,6 @@ cysec-project/
 
 ## ⚠️ Yasal Uyarı
 
-Bu araç **yalnızca eğitim ve yetkili güvenlik testleri** amacıyla geliştirilmiştir.  
-Sahip olmadığınız veya test etme izniniz bulunmayan ağ ve sistemlere karşı kullanmak yasaldır.  
+Bu araç **yalnızca eğitim ve yetkili güvenlik testleri** amacıyla geliştirilmiştir.
+Sahip olmadığınız veya test etme izniniz bulunmayan ağ ve sistemlere karşı kullanmak yasaktır.
 Kullanım sorumluluğu tamamen kullanıcıya aittir.
-
-

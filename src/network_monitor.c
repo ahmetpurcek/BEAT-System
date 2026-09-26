@@ -1653,7 +1653,7 @@ static void *procnet_fallback_thread(void *arg) {
     (void)arg;
     fprintf(stderr, "[FULL_MONITOR] Fallback mode: polling /proc/net (no CAP_NET_RAW for pcap)\n");
     fprintf(stderr, "[FULL_MONITOR] Ipucu: Tum trafigi gormek icin sudo ile calistirin veya:\n");
-    fprintf(stderr, "[FULL_MONITOR]   sudo setcap cap_net_raw,cap_net_admin+eip ./build-linux/guvenlik_merkezi\n");
+    fprintf(stderr, "[FULL_MONITOR]   sudo setcap cap_net_raw,cap_net_admin+eip ./build/beat_system\n");
 
     platform_sleep_ms(1000); /* ilk başta biraz bekle */
 

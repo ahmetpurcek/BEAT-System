@@ -15,6 +15,3 @@ Makefile
 *.out
 
 
-network_ids.c.bak15
-network_ids.c.bak14
-network_monitor.c.bak14

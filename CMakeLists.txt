@@ -1,10 +1,15 @@
 cmake_minimum_required(VERSION 3.16)
-project(AkilliSehirGuvenlik C)
+project(BEAT_System C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
-# Kaynak dosyaları
+# Build tipi belirtilmediyse Release kullan
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release)
+endif()
+
+# Kaynak dosyalar
 set(SOURCES
     src/main.c
     src/platform.c
@@ -18,39 +23,50 @@ set(SOURCES
     src/filter_engine.c
 )
 
-# Header dizinleri
-include_directories(include)
-include_directories(lib)
-
 # Hedef
-add_executable(guvenlik_merkezi ${SOURCES})
+add_executable(beat_system ${SOURCES})
 
-# Linux bağımlılıkları
-find_package(PkgConfig REQUIRED)
-
-# raylib
-pkg_check_modules(RAYLIB REQUIRED raylib)
-target_include_directories(guvenlik_merkezi PRIVATE ${RAYLIB_INCLUDE_DIRS})
-target_link_directories(guvenlik_merkezi PRIVATE ${RAYLIB_LIBRARY_DIRS})
-
-target_link_libraries(guvenlik_merkezi
-    ${RAYLIB_LIBRARIES}
-    m           # math
-    pthread     # threads
-    dl          # dynamic loading
-    pcap        # packet capture
+# Header dizinleri (yalnizca bu hedef icin)
+target_include_directories(beat_system PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/lib
 )
 
-# OpenGL ve X11 bağımlılıkları (raylib için)
-find_package(OpenGL)
-if(OPENGL_FOUND)
-    target_link_libraries(guvenlik_merkezi ${OPENGL_LIBRARIES})
-endif()
+# GNU uzantilari (raw soket, getifaddrs vb.)
+target_compile_definitions(beat_system PRIVATE _GNU_SOURCE)
 
-# Derleme bayrakları
-target_compile_options(guvenlik_merkezi PRIVATE
+# Derleme bayraklari
+target_compile_options(beat_system PRIVATE
     -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers
 )
+
+# --- Bagimliliklar ---
+find_package(PkgConfig REQUIRED)
+
+# raylib (pkg-config uzerinden)
+pkg_check_modules(RAYLIB REQUIRED IMPORTED_TARGET raylib)
+target_link_libraries(beat_system PRIVATE PkgConfig::RAYLIB)
+
+# libpcap
+pkg_check_modules(PCAP REQUIRED IMPORTED_TARGET libpcap)
+target_link_libraries(beat_system PRIVATE PkgConfig::PCAP)
+
+# Threads (pthread)
+find_package(Threads REQUIRED)
+target_link_libraries(beat_system PRIVATE Threads::Threads)
+
+# OpenGL (raylib icin zorunlu)
+find_package(OpenGL REQUIRED)
+target_link_libraries(beat_system PRIVATE OpenGL::GL)
+
+# X11 (raylib statik derlendiyse gerekli olabilir)
+find_package(X11)
+if(X11_FOUND)
+    target_link_libraries(beat_system PRIVATE ${X11_LIBRARIES})
+endif()
+
+# m (math) ve dl (dynamic loading)
+target_link_libraries(beat_system PRIVATE m dl)
 
 message(STATUS "Platform: ${CMAKE_SYSTEM_NAME}")
 message(STATUS "Derleyici: ${CMAKE_C_COMPILER}")

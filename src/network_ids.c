@@ -614,7 +614,7 @@ static void ids_host_victim(uint32_t ip, uint32_t points, uint32_t flag);
  * tekrar gelirse bastırılır (tekrarlı akışlar uyarı yağmuruna dönüşmesin).
  * ARP'de src_ip 0 kaldığı için saldırgan/kurban ham çerçevenin
  * sender/target IP'lerinden alınır. */
-#define IDS_DEDUP_MAX 64
+#define IDS_DEDUP_MAX 256
 #define IDS_DEDUP_TTL 120
 
 typedef struct {
@@ -2043,9 +2043,9 @@ static const IdsSig g_sigs[] = {
 };
 #define IDS_SIG_COUNT (int)(sizeof(g_sigs) / sizeof(g_sigs[0]))
 
-static int ids_mem_ci_find(const uint8_t *hay, int hlen, const char *needle) {
+static int ids_mem_ci_find_pos(const uint8_t *hay, int hlen, const char *needle) {
     int nlen = (int)strlen(needle);
-    if (nlen == 0 || nlen > hlen) return 0;
+    if (nlen == 0 || nlen > hlen) return -1;
     for (int i = 0; i + nlen <= hlen; i++) {
         int j = 0;
         for (; j < nlen; j++) {
@@ -2055,9 +2055,35 @@ static int ids_mem_ci_find(const uint8_t *hay, int hlen, const char *needle) {
             if (b >= 'A' && b <= 'Z') b = (char)(b + 32);
             if (a != b) break;
         }
-        if (j == nlen) return 1;
+        if (j == nlen) return i;
     }
-    return 0;
+    return -1;
+}
+
+/* FP DUZELTMESI: yapisal karakterle ('-' gibi) baslayan imzalar icin sol
+ * sinir kontrolu. "Accept-Encoding: gzip" baslikindaki "-Enc" dizisi,
+ * "-enc" (PowerShell EncodedCommand) imzasiyla buyuk/kucuk harf duyarsiz
+ * eslesip normal tarayici GET isteklerinde YUKSEK FP uretiyordu (gercek
+ * CDN trafiyle dogrulandi: 151.101.x / 95.101.x / 199.232.x:80 GET'leri).
+ * Eslesmeden hemen once harf/rakam varsa eslesme bir sozcugun parcasi
+ * kabul edilip atlanir; "powershell -enc <base64>" ve "-EncodedCommand"
+ * senaryolarinda oncesinde bosluk/teklif oldugu icin TP korunur.
+ * Yapisal karakterle baslamayan imzalar etkilenmez. */
+static int ids_sig_left_boundary_ok(const uint8_t *p, int pos, const char *needle) {
+    unsigned char first = (unsigned char)needle[0];
+    int first_alnum = ((first >= '0' && first <= '9') ||
+                       (first >= 'A' && first <= 'Z') ||
+                       (first >= 'a' && first <= 'z'));
+    if (first_alnum || pos == 0) return 1;
+    unsigned char prev = p[pos - 1];
+    int prev_alnum = ((prev >= '0' && prev <= '9') ||
+                      (prev >= 'A' && prev <= 'Z') ||
+                      (prev >= 'a' && prev <= 'z'));
+    return !prev_alnum;
+}
+
+static int ids_mem_ci_find(const uint8_t *hay, int hlen, const char *needle) {
+    return ids_mem_ci_find_pos(hay, hlen, needle) >= 0;
 }
 
 static int ids_mem_has_run(const uint8_t *p, int n, uint8_t byte, int min_run) {
@@ -2139,7 +2165,9 @@ static void ids_check_payload(const IdsPktInfo *pi) {
     for (i = 0; i < IDS_SIG_COUNT; i++) {
         const IdsSig *sg = &g_sigs[i];
         if (sg->request_only && !is_request) continue;
-        if (!ids_mem_ci_find(p, scan, sg->needle)) continue;
+        int mpos = ids_mem_ci_find_pos(p, scan, sg->needle);
+        if (mpos < 0) continue;
+        if (!ids_sig_left_boundary_ok(p, mpos, sg->needle)) continue;
 
         snprintf(k2, sizeof(k2), "G|%d|%u", i, pi->src_ip);
         tr = ids_tracker_get(k2);
@@ -2156,7 +2184,15 @@ static void ids_check_payload(const IdsPktInfo *pi) {
     /* Shellcode sled'leri: NOP (0x90) / INT3 (0xCC) serileri.
      *  Esik normalde 16; binary protokol portlarinda 32
      * (SMB/DB akislarinda 0x90/0xCC rastgele dolgu olarak gorulebilir). */
-    int sl_edge = (ids_port_is_binary_proto(pi->src_port) ||
+    /* FP DUZELTMESI: yanit yonu (src_port < 1024) icerikleri — CDN/binary
+     * indirmelerde (or. Fastly 199.232.x:80, dosya icindeki 0xCC fonksiyon
+     * dolgusu) >=16 ardIsIk 0xCC KRITIK "Shellcode (INT3-sled)" FP
+     * uretiyordu (gercek trafikle dogrulandi). Yanit yonunde esik ikiye
+     * katlanir (32; binary-proto esigiyla ayni); istek yonunde 16 kalir
+     * (istek tasimali gercek shellcode TP'si korunur). Yanit yonundeki
+     * buyuk sled TP'si (>=32) hala tetiklenir. */
+    int sl_edge = (!is_request ||
+                   ids_port_is_binary_proto(pi->src_port) ||
                    ids_port_is_binary_proto(pi->dst_port)) ? 32 : 16;
     if (ids_mem_has_run(p, n, 0x90, sl_edge)) {
         snprintf(k2, sizeof(k2), "G|NOP|%u", pi->src_ip);
@@ -2481,7 +2517,12 @@ static void ids_check_rules(const IdsPktInfo *pi) {
     }
 
     /* ---------- 1b. ARP IP cakismasi: yabanci MAC yerel IP'yi sahipleniyor ---------- */
-    if (pi->is_arp && g_local_ip && pi->arp_sender_ip == g_local_ip) {
+    /* Kendi MAC baglami (local_mac) henuz ogrenilmediyse bu kontrol
+     * atlanir; aksi halde kendi gratuitous ARP'imiz "yabanci MAC yerel
+     * IP'yi sahipleniyor" seklinde KRITIK FP uretiyordu (headless
+     * baslangicinda local_mac bos oldugu icin gercek trafikle dogrulandi). */
+    if (pi->is_arp && g_local_ip && !ids_mac_zero(g_local_mac) &&
+        pi->arp_sender_ip == g_local_ip) {
         int is_ours = (memcmp(pi->arp_sender_mac, g_local_mac, 6) == 0);
         if (!is_ours) {
             char desc[160];
@@ -2696,7 +2737,21 @@ static void ids_check_rules(const IdsPktInfo *pi) {
                 int wk = (pi->dst_port < 1024);
                 uint32_t priv_thr = (uint32_t)((wk ? 30 : 15) * am);
                 uint32_t pub_thr  = (uint32_t)((wk ? 12 : 6) * am);
-                if (priv >= (int)priv_thr || pub >= (int)pub_thr) {
+                /* FP DUZELTMESI: genel (public) hedeflere WEB portlarinda
+                 * (80/443/8080/8443) yatay fan-out normal istemci
+                 * davranisidir - tarayicilar, guncelleyiciler ve CDN'ler
+                 * onlarca farkli genel IP'ye TLS baglantisi acar. Bu durum
+                 * "agda olmayan IP'lerin 443 portunda SYN taramasi"
+                 * seklinde YUKSEK yanlis pozitif uretiyordu (gercek
+                 * trafikle dogrulandi). Genel web hedefleri yatay tarama
+                 * sayimindan MUAF tutulur; ozel (LAN) hedefler ve genel
+                 * web-disi portlar (22/445/3389 vb.) eskisi gibi izlenir
+                 * (brute-force kuralindaki is_web && !dst_priv muafiyetiyle
+                 * ayni mantik). */
+                int pub_web = (!ids_ip_is_private(pi->dst_ip) &&
+                               ids_is_web_port(pi->dst_port));
+                if (!pub_web &&
+                    (priv >= (int)priv_thr || pub >= (int)pub_thr)) {
                     t->long_short_hit = 1;   /* [18] kisa pencere yakaladi */
                     char desc[192];
                     char s[46];
@@ -2714,7 +2769,7 @@ static void ids_check_rules(const IdsPktInfo *pi) {
                 /* Yavas yatay tarama (tek port, cok hedef):
                  * hedefler arasinda sn'lerce beklendiginde kisa pencere
                  * esigi (ozel 15 / genel 6) hic dolmuyordu. */
-                if (ids_tracker_long_scan(t)) {
+                if (!pub_web && ids_tracker_long_scan(t)) {
                     char ldesc[192];
                     char ls[46];
                     ids_ip_to_str(pi->src_ip, ls, sizeof(ls));
@@ -2900,7 +2955,10 @@ static void ids_check_rules(const IdsPktInfo *pi) {
         /* DNS anomali: tek kaynaktan aşırı sorgu.
          *  Esik 50 -> 150, sev ORTA -> DUSUK: normal aglarda
          * sistem/yedekleme trafigi tek kaynaktan yuzlerce sorgu uretebilir. */
-        if (pi->is_dns) {
+        if (pi->is_dns && pi->dst_port == 53) {
+            /* Yalnizca gercek DNS (53) sayilir. mDNS (5353) parse sirasinda
+             * is_dns=1 aliyor; yerel multicast kesif sorgularinin DNS
+             * anomali/tunneling sayacina sizmasi FP uretiyordu. */
             snprintf(key, sizeof(key), "D|%u", pi->src_ip);
             t = ids_tracker_get(key);
             if (t) {

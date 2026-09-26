@@ -1,5 +1,5 @@
 /*
- * gui.c — CyberSOC: raylib + raygui native GUI (v3 — Siyah SOC Tema)
+ * gui.c — BEAT System: raylib + raygui native GUI (v3 — Siyah Tema)
  *
  * Yeniden tasarim ozeti:
  *  - Saf siyah zemin, neon cyan/mor aksanlar, HUD tarzi header (durum
@@ -117,6 +117,19 @@ static int mon_list_remove_at(int idx) {
  * gorunum satiri -> harita -> snapshot dizini uzerinden yapilir. */
 static int g_ids_alert_map[IDS_MAX_GUI_ALERTS];
 static int g_ids_alert_view_count = 0;
+
+/* --- Uyari sekmesi onem-derecesi filtresi (analist triyaji) ---
+ * g_ids_sev_filter: -1=tumu, 0=KRITIK, 1=YUKSEK, 2=ORTA, 3=DUSUK. */
+static int g_ids_sev_filter = -1;
+
+static int severity_rank(const char *sev) {
+  if (!sev) return 3;
+  if (strcmp(sev, "KRITIK") == 0) return 0;
+  if (strcmp(sev, "YUKSEK") == 0) return 1;
+  if (strcmp(sev, "ORTA") == 0) return 2;
+  return 3;
+}
+
 static void ids_rebuild_alert_view(void) {
   g_ids_alert_view_count = 0;
   for (int i = 0; i < g_ids_alert_count; i++) {
@@ -124,6 +137,10 @@ static void ids_rebuild_alert_view(void) {
     /* Kapsam: iki uc da listede yoksa gosterme. BOS liste = kapsam yok
      * -> hicbir uyari gosterilmez (bos listeyken izleme yok). */
     if (!mon_list_has(va->src_ip) && !mon_list_has(va->dst_ip))
+      continue;
+    /* Onem derecesi filtresi: secili seviye disi kayitlari gizle. */
+    if (g_ids_sev_filter >= 0 &&
+        severity_rank(va->severity) != g_ids_sev_filter)
       continue;
     g_ids_alert_map[g_ids_alert_view_count++] = i;
   }
@@ -190,7 +207,7 @@ static Color ui_mix(Color a, Color b, float t) {
                  (unsigned char)(a.b * (1 - t) + b.b * t), 255};
 }
 
-/* Kalkan (SOC) ikonu — brand ve bos-durum gorselleri icin */
+/* Kalkan ikonu — brand ve bos-durum gorselleri icin */
 static void draw_shield_icon(float cx, float cy, float s, Color fill,
                              Color outline) {
   Vector2 v[6] = {
@@ -226,16 +243,16 @@ static void draw_dot_label(int x, int y, Color dot, const char *label,
 /* Secilen onem derecesi -> renk (IDS alarmlari) */
 static Color severity_color(const char *sev) {
   if (sev && strcmp(sev, "KRITIK") == 0) return COLOR_RED;
-  if (sev && strcmp(sev, "YUKSEK") == 0) return COLOR_AMBER;
-  if (sev && strcmp(sev, "ORTA") == 0) return (Color){234, 179, 8, 255};
+  if (sev && strcmp(sev, "YUKSEK") == 0) return COLOR_ORANGE;
+  if (sev && strcmp(sev, "ORTA") == 0) return COLOR_YELLOW;
   return COLOR_GREEN; /* DUSUK / bilinmeyen */
 }
 
 /* CVE onem derecesi -> renk (port tarayici) */
 static Color cve_severity_color(const char *sev) {
   if (sev && strcmp(sev, "CRITICAL") == 0) return COLOR_RED;
-  if (sev && strcmp(sev, "HIGH") == 0) return COLOR_AMBER;
-  if (sev && strcmp(sev, "MEDIUM") == 0) return (Color){234, 179, 8, 255};
+  if (sev && strcmp(sev, "HIGH") == 0) return COLOR_ORANGE;
+  if (sev && strcmp(sev, "MEDIUM") == 0) return COLOR_YELLOW;
   return COLOR_GREEN;
 }
 
@@ -280,7 +297,7 @@ static void draw_custom_scrollbar(float x, float y, float w, float view_h,
                        COLOR_SCROLLBAR);
 }
 
-/* Panel basligi: vurgu cizgisi + baslik (SOC tutarli gorunum) */
+/* Panel basligi: vurgu cizgisi + baslik (tutarlı gorunum) */
 static void draw_panel_title(int x, int y, const char *title, int size,
                              Color color) {
   DrawRectangle(x, y + 2, 3, size - 1, color);
@@ -309,7 +326,7 @@ static void draw_right_panel_device(int rx, int ry, int rw, int rh);
 static void draw_mon_list_panel(int rx, int ry, int rw, int rh);
 
 
-/* ========== Header (SOC HUD) ========== */
+/* ========== Header (BEAT System HUD) ========== */
 static void draw_header(int W) {
   DrawRectangle(0, 0, W, 48, COLOR_HEADER_BG);
   DrawRectangle(0, 47, W, 1, COLOR_BORDER);
@@ -329,8 +346,7 @@ static void draw_header(int W) {
 
   /* Marka: kalkan ikonu + baslik */
   draw_shield_icon(30, 23, 20, ui_alpha(COLOR_ACCENT, 40), COLOR_ACCENT);
-  DrawTextC("CYBERSOC", 46, 9, 16, COLOR_TEXT);
-  DrawTextC("Guvenlik Merkezi", 46, 29, 8, COLOR_TEXT_DIM);
+  DrawTextC("BEAT System", 46, 16, 16, COLOR_TEXT);
 
   /* Saga yasli durum kumesi */
   char clock[16];
@@ -1148,8 +1164,8 @@ static void draw_panel_security(int W, int H) {
   int cw = (W - 40) / 4;
   struct { const char *label; int val; Color color; } cats[] = {
     {"KRITIK", cnt_kritik, COLOR_RED},
-    {"YUKSEK", cnt_yuksek, COLOR_AMBER},
-    {"ORTA",   cnt_orta,   (Color){234, 179, 8, 255}},
+    {"YUKSEK", cnt_yuksek, COLOR_ORANGE},
+    {"ORTA",   cnt_orta,   COLOR_YELLOW},
     {"DUSUK",  cnt_dusuk,  COLOR_GREEN},
   };
   char nbuf[16];
@@ -1197,7 +1213,7 @@ static void draw_panel_security(int W, int H) {
   /* Legend (basligin saginda) */
   {
     const char *sevs[] = {"KRITIK", "YUKSEK", "ORTA", "DUSUK"};
-    Color scs[] = {COLOR_RED, COLOR_AMBER, (Color){234, 179, 8, 255},
+    Color scs[] = {COLOR_RED, COLOR_ORANGE, COLOR_YELLOW,
                    COLOR_GREEN};
     char hbuf[80];
     snprintf(hbuf, sizeof(hbuf), "TEHDIT ALARMLARI (%d)", g_ids_alert_view_count);
@@ -1207,6 +1223,37 @@ static void draw_panel_security(int W, int H) {
       DrawCircle(lxx + 4, py + 16, 3, scs[li]);
       DrawTextC(sevs[li], lxx + 12, py + 11, 7, scs[li]);
       lxx += lw + 8;
+    }
+  }
+
+  /* Onem derecesi filtresi (analist triyaji): TUMU + 4 seviye */
+  {
+    const char *flabels[] = {"TUMU", "KRITIK", "YUKSEK", "ORTA", "DUSUK"};
+    int fvals[] = {-1, 0, 1, 2, 3};
+    Color fcolors[] = {COLOR_ACCENT, COLOR_RED, COLOR_ORANGE,
+                       COLOR_YELLOW, COLOR_GREEN};
+    int fw = 56, fgap = 4;
+    int fx = W - 110 - 12 - (5 * fw + 4 * fgap);
+    for (int fi = 0; fi < 5; fi++) {
+      Rectangle fr = {fx + fi * (fw + fgap), py + 6, fw, 20};
+      int sel = (g_ids_sev_filter == fvals[fi]);
+      int hov = CheckCollisionPointRec(GetMousePosition(), fr);
+      Color fc = fcolors[fi];
+      DrawRectangleRounded(fr, 0.35f, 6,
+                           sel ? ui_alpha(fc, 60)
+                               : (hov ? ui_alpha(fc, 26)
+                                      : ui_alpha(COLOR_SURFACE2, 200)));
+      DrawRectangleRoundedLinesEx(fr, 0.35f, 6, 1.0f,
+                                  sel ? ui_alpha(fc, 200)
+                                      : ui_alpha(fc, 70));
+      int tw = MeasureText(flabels[fi], 8);
+      DrawTextC(flabels[fi], (int)(fr.x + (fw - tw) / 2), py + 12, 8,
+                sel ? fc : ui_mix(fc, COLOR_TEXT, 0.35f));
+      if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && hov) {
+        g_ids_sev_filter = (g_ids_sev_filter == fvals[fi]) ? -1 : fvals[fi];
+        g_scroll_alerts = 0;
+        ids_rebuild_alert_view();
+      }
     }
   }
 
@@ -1257,9 +1304,9 @@ static void draw_panel_security(int W, int H) {
     Color bg = strcmp(al->severity, "KRITIK") == 0
                    ? (Color){26, 10, 10, 255}
                    : strcmp(al->severity, "YUKSEK") == 0
-                         ? (Color){26, 20, 8, 255}
+                         ? (Color){30, 16, 6, 255}
                          : strcmp(al->severity, "ORTA") == 0
-                               ? (Color){22, 20, 8, 255}
+                               ? (Color){28, 25, 6, 255}
                                : COLOR_SURFACE;
     DrawRectangleRounded(ir, 0.08f, 6, bg);
     DrawRectangleRoundedLinesEx(ir, 0.08f, 6, 1.0f, ui_alpha(sc, 60));
@@ -1631,12 +1678,12 @@ static void draw_panel_tools(int W, int H) {
         DrawTextC(buf, 44 + 102, cy + 6, 9, COLOR_GREEN);
         char pp[200];
         full_monitor_pcap_record_path(pp, sizeof(pp));
-        DrawTextC(pp[0] ? pp : "/tmp/guvenlik_merkezi.pcap", 24, cy + 24, 7,
+        DrawTextC(pp[0] ? pp : "/tmp/beat_system.pcap", 24, cy + 24, 7,
                   COLOR_TEXT_DIM);
         cy += 36;
       } else {
         if (GuiButton((Rectangle){24, cy, ctrl_w - 40, 22}, "PCAP Kaydet")) {
-          if (full_monitor_pcap_record_start("/tmp/guvenlik_merkezi.pcap") != 0)
+          if (full_monitor_pcap_record_start("/tmp/beat_system.pcap") != 0)
             g_pcap_rec_fail = 1;
           else
             g_pcap_rec_fail = 0;
@@ -2551,7 +2598,7 @@ void gui_init(int width, int height) {
 
   SetTargetFPS(30);
 
-  /* raygui style — siyah SOC temasina uygun */
+  /* raygui style — siyah temaya uygun */
   GuiSetStyle(DEFAULT, TEXT_SIZE, 12);
   GuiSetStyle(DEFAULT, BACKGROUND_COLOR, ColorToInt(COLOR_PANEL));
   GuiSetStyle(BUTTON, BASE_COLOR_NORMAL, ColorToInt(COLOR_SURFACE2));

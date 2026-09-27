@@ -23,7 +23,7 @@ hem IDS tarafından puanlanır, hem de müdahale motorlarına girdi olur.
 | **2. Kapsam seçimi** | Hangi cihazların izleneceğini belirler; tüm motorlar bu listeye bağlanır | **İzleme Listesi (scope)** |
 | **3. Görünürlük** | Trafiği paket bazında yakalar, katman katman çözer, filtrelenebilir liste sunar | `network_monitor` + `filter_engine` |
 | **4. Tespit** | Çözülen trafiği kurallardan geçirir, saldırı/kurban skorları üretir | `network_ids` |
-| **5. Müdahale** | Seçilen cihazı ağdan keser veya seçilen siteyi karartır | `arp_block` + `site_block` |
+| **5. Müdahale** | Seçilen cihazı ağdan keser veya seçilen siteyi karartır | `site_block` |
 
 Buna ek olarak hedef bazlı derinlemesine inceleme için `port_scanner` (stealth
 port/servis/zafiyet taraması) ayrı bir araç sekmesinde sunulur.
@@ -31,38 +31,38 @@ port/servis/zafiyet taraması) ayrı bir araç sekmesinde sunulur.
 ### Veri hattı (modüller nasıl bağlanıyor?)
 
 ```
-          ┌─────────────────────────────────────────────────┐
-          │ BEAT System — tek süreç, tek veri hattı         │
-          └──────────────────────┬──────────────────────────┘
-                                  │
-[1] KEŞİF ────────────────────────┤
+          ┌───────────────────────────────────────────────┐
+          │                 BEAT System                   │
+          └──────────────────────┬────────────────────────┘
+                                 │
+[1] KEŞİF ───────────────────────┤
   arp_scanner: raw ARP sweep + ip neigh
-                                  │
-                                  ▼
-                   ┌──────────────┬─────────────┐
-                   │        İZLEME LİSTESİ      │
-                   │           (scope)          │
-                   └──────────┬─────────────────┘
-                              │
-[2] GÖRÜNÜRLÜK ───────────────┤
+                                 │
+                                 ▼
+                   ┌─────────────┬─────────────┐
+                   │       İzleme Listesi      │
+                   │          (scope)          │
+                   └─────────────┬─────────────┘
+                                 │
+[2] GÖRÜNÜRLÜK ──────────────────┤
   network_monitor (libpcap) → filter_engine
   └─ L2..L7 dissector, app_domain (DNS / TLS SNI / HTTP / QUIC)
-                              │
-[3] TESPİT ───────────────────┤
+                                 │
+[3] TESPİT ──────────────────────┤
   network_ids (~20 kural) → skor + alarm
   └─ GUI: Alarm Merkezi + Tehdit Haritası
-                              │
-[4] MÜDAHALE ─────────────────┤
+                                 │
+[4] MÜDAHALE ────────────────────┤
   site_block (Karartma)
   └─ raw_inject: yalnızca listedeki hedefler
-                              │
-                              ▼
+                                 │
+                                 ▼
 
 Bağımsız yüzeyler (İzleme Listesi'ne BAKMAZ):
-                   ┌──────────────────────────────────┐
-                   │  • Port Tarayıcı (manuel hedef)  │
-                   │  • ARP Black-Hole (KES/AÇ)       │
-                   └──────────────────────────────────┘
+                  ┌──────────────────────────────────┐
+                  │  • Port Tarayıcı (manuel hedef)  │
+                  │  • ARP Black-Hole (KES/AÇ)       │
+                  └──────────────────────────────────┘
 ```
 
 **Kritik bağ:** `network_monitor` çözücüsü, uygulama katmanından çıkardığı alan

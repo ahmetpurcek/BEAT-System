@@ -2391,9 +2391,11 @@ static void draw_panel_tools(int W, int H) {
     cy += 8;
 
     /* --- Alan adi giris kutusu --- */
-    DrawTextC("Alan Adi (facebook.com / *.youtube.com):", 20, cy, 10,
-              COLOR_TEXT_SEC);
-    cy += 14;
+    DrawTextC("Alan Adi (facebook.com):", 20, cy, 10, COLOR_TEXT_SEC);
+    cy += 13;
+    DrawTextC("Joker: *youtube.com (alt alan)  *youtube* (icerir)", 20, cy, 8,
+              COLOR_TEXT_DIM);
+    cy += 12;
     Rectangle dbox = {20, cy, ctrl_w - 40, 24};
     int mclick = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
     int dhover = CheckCollisionPointRec(GetMousePosition(), dbox);

@@ -82,6 +82,12 @@ static int  sb_fw_ready = 0;
 static platform_mutex_t sb_fw_lock;
 static const char *sb_ipt_bin = NULL;
 
+/* Gozlem aninda cozumleme onbellegi: ayni (kurban,alan adi) cifti icin
+ * tekrar getaddrinfo yapilmasini onler (paket yolunda bloklanma olmasin). */
+#define SB_PRIME_MAX 512
+static char sb_primed_key[SB_PRIME_MAX][SB_IP_LEN + SB_DOMAIN_LEN + 2];
+static int  sb_primed_count = 0;
+
 static double sb_now(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -115,6 +121,8 @@ void site_block_init(void) {
     sb_fw_count = 0;
     sb_fw_ready = 0;
     sb_ipt_bin = NULL;
+    memset(sb_primed_key, 0, sizeof(sb_primed_key));
+    sb_primed_count = 0;
     platform_mutex_init(&sb_lock);
     platform_mutex_init(&sb_fw_lock);
     sb_inited = 1;
@@ -367,16 +375,48 @@ int site_block_get_rule(int index, SiteBlockRule *out) {
     return 0;
 }
 
-/* Alan adi eslesmesi: "*" (tum), "*.x" (x + alt alanlari), "x" (x + alt). */
+/* Genel joker (glob) eslesmesi: '*' sifir veya daha fazla karakterle eslesir.
+ * Domain girdileri sb_norm_domain ile kucultulur; kural da kucultulmus saklanir
+ * (bkz. site_block_add_rule), bu yuzden ek kucultme gerekmez. */
+static int sb_glob_match(const char *pat, const char *str) {
+    while (*pat) {
+        if (*pat == '*') {
+            while (*pat == '*') pat++;            /* ardisik jokerleri yut */
+            if (!*pat) return 1;                  /* son joker: geri kalan her sey */
+            for (const char *s = str; ; s++) {
+                if (sb_glob_match(pat, s)) return 1;
+                if (!*s) break;
+            }
+            return 0;
+        }
+        if (*str != *pat) return 0;
+        pat++; str++;
+    }
+    return *str == '\0';
+}
+
+/* Alan adi eslesmesi:
+ *   "*"            -> tum alan adlari
+ *   "*.youtube.com"-> youtube.com + alt alanlari (ozel; mevcut davranis)
+ *   "*youtube.com" -> "youtube.com" ile bitenler (a.youtube.com, b.youtube.com)
+ *   "*youtube*"    -> icinde "youtube" gecen her sey (youtube.com, myyoutube.net...)
+ *   "youtube.com"  -> youtube.com + alt alanlari (joker yok) */
 static int sb_domain_match(const char *rule, const char *domain) {
     if (!rule || !domain || !domain[0]) return 0;
     if (strcmp(rule, "*") == 0) return 1;
-    const char *base = rule;
-    if (rule[0] == '*' && rule[1] == '.') base = rule + 2;
-    if (strcmp(domain, base) == 0) return 1;
-    size_t bl = strlen(base);
+
+    if (strchr(rule, '*')) {
+        /* "*.x" bicimi (x icinde baska joker yok): x + alt alanlari korunur */
+        if (rule[0] == '*' && rule[1] == '.' && !strchr(rule + 2, '*'))
+            return sb_domain_match(rule + 2, domain);
+        return sb_glob_match(rule, domain);
+    }
+
+    /* Joker yok: tam eslesme veya alt alan */
+    if (strcmp(domain, rule) == 0) return 1;
+    size_t bl = strlen(rule);
     size_t dl = strlen(domain);
-    if (dl > bl && strcmp(domain + (dl - bl), base) == 0 && domain[dl - bl - 1] == '.')
+    if (dl > bl && strcmp(domain + (dl - bl), rule) == 0 && domain[dl - bl - 1] == '.')
         return 1;
     return 0;
 }
@@ -494,7 +534,7 @@ int site_block_block_observed(const char *ip, const char *domain, int mode) {
 }
 
 /* Bir gozlem satirinin "Ac" (engeli kaldir) islemi: (ip, domain) ile
- * ESLEMEN tum kurallari kaldirir — wildcard kurallar ("*", "*.x") dahil.
+ * ESLEMEN tum kurallari kaldirir — wildcard kurallar ("*", "*.x", "*x.com", "*x*") dahil.
  * Baska cihazlarin ayni alan adi kurallarina dokunmaz. Kaldirilan her kuralin
  * cekirdek (iptables) girdileri de temizlenir ve gozlem bayraklari tazelenir.
  * Kaldirilan kural sayisini dondurur (0 = eslesen kural yoktu). */
@@ -883,11 +923,17 @@ static int sb_dns_hexpattern(const char *domain, char *out, size_t outsz) {
     if (!domain || !domain[0] || !out || outsz < 16) return -1;
     size_t o = 0;
     const char *p = domain;
-    while (*p == '*' || *p == '.') p++;   /* joker/kok nokta temizligi */
+    while (*p == '*' || *p == '.') p++;   /* bastaki joker/kok nokta temizligi */
+    int truncated = 0;                     /* icte/sonda joker: |00| eklenmez */
     while (*p) {
-        const char *dot = strchr(p, '.');
-        size_t len = dot ? (size_t)(dot - p) : strlen(p);
-        if (len == 0) { if (!dot) break; p = dot + 1; continue; }
+        if (*p == '*') { truncated = 1; break; }
+        const char *dot  = strchr(p, '.');
+        const char *star = strchr(p, '*');
+        size_t len;
+        if (star && (!dot || star < dot)) { len = (size_t)(star - p); truncated = 1; }
+        else if (dot) len = (size_t)(dot - p);
+        else          len = strlen(p);
+        if (len == 0) { if (truncated) break; p = dot ? dot + 1 : p + 1; continue; }
         if (len > 63) return -1;          /* gecersiz DNS etiketi */
         int n = snprintf(out + o, outsz - o, "|%02x|", (unsigned)len);
         if (n < 0 || (size_t)n >= outsz - o) return -1;
@@ -898,11 +944,14 @@ static int sb_dns_hexpattern(const char *domain, char *out, size_t outsz) {
             if (o + 1 >= outsz) return -1;
             out[o++] = (char)c;
         }
+        if (truncated) break;
         if (!dot) break;
         p = dot + 1;
     }
-    if (o + 4 >= outsz) return -1;
-    memcpy(out + o, "|00|", 4); o += 4;
+    if (!truncated) {
+        if (o + 4 >= outsz) return -1;
+        memcpy(out + o, "|00|", 4); o += 4;
+    }
     out[o] = '\0';
     return 0;
 }
@@ -994,20 +1043,81 @@ void site_block_fw_clear(void) {
  *      baglantisi dahi engellenir (onceden cozulmus/cached IP dahil).
  *   2. DNS string DROP: kurbanin bundan sonraki sorgusu cekirdekte duser,
  *      boylece gercek yanit hic uretilmez (yaris yok).
- * Joker (* veya *) hedefler icin onleyici kurulum yapilmaz; gozlem yolu
- * somut kurban gordukce kurallari zaten kurar. */
+ * Joker: "*.x"/"*x.com" tabani somut koke indirilip cozumlenir; yalnizca
+ * "*" veya icte jokerli ("*x*") hedefler onleyici IP kurulumundan muaftir.
+ * Boyle durumlarda gozlem yolu somut kurban gordukce kurallari kurar. */
 void site_block_fw_prime(const char *owner_ip, const char *domain) {
     if (!sb_inited) site_block_init();
     if (!owner_ip || !owner_ip[0] || strcmp(owner_ip, "*") == 0) return;
     if (!domain || !domain[0] || strcmp(domain, "*") == 0) return;
 
-    /* Wildcard basligini soy: "*.youtube.com" -> "youtube.com" */
+    /* Bastaki joker/kok noktalari soy:
+     *   "*.youtube.com" -> "youtube.com",  "*youtube.com" -> "youtube.com" */
     const char *base = domain;
-    if (domain[0] == '*' && domain[1] == '.') base = domain + 2;
+    while (*base == '*' || *base == '.') base++;
     if (!base[0]) return;
 
     /* 1) Alan adini kendimiz cozumle (DNS kuralindan ONCE: kendi sorgumuz
-     *    engellenmesin) ve IP DROP kurallarini kur. */
+     *    engellenmesin) ve IP DROP kurallarini kur. Icte kalan joker
+     *    ("*youtube*") cozumlenemez; bu durumda IP katmani atlanir ve DNS
+     *    deseni + gozlem yolu devreye girer. */
+    if (!strchr(base, '*')) {
+        struct addrinfo hints, *res = NULL;
+        memset(&hints, 0, sizeof(hints));
+        hints.ai_family   = AF_INET;
+        hints.ai_socktype = SOCK_STREAM;
+        if (getaddrinfo(base, NULL, &hints, &res) == 0) {
+            for (struct addrinfo *p = res; p; p = p->ai_next) {
+                char ipbuf[INET_ADDRSTRLEN];
+                struct sockaddr_in *sin = (struct sockaddr_in *)p->ai_addr;
+                if (sin && inet_ntop(AF_INET, &sin->sin_addr, ipbuf, sizeof(ipbuf)))
+                    site_block_fw_block_ip(owner_ip, ipbuf, owner_ip, domain);
+            }
+            freeaddrinfo(res);
+        }
+    }
+
+    /* 2) DNS string DROP (udp/tcp 53) - jokerli taban da desene cevrilir */
+    site_block_fw_block_dns(owner_ip, base, owner_ip, domain);
+}
+
+int site_block_fw_active(void) { return sb_fw_ready ? 1 : 0; }
+
+/* Gozlem aninda bir alan adini KENDIMIZ cozumler ve A kayitlarinin TAMAMINI
+ * kurban icin IP DROP olarak kurar.
+ *
+ * Neden gerekli: bazi uygulamalar (or. Instagram) DNS sorgusu engellense bile
+ * onbellekteki/jeton IP'lere ya da SNI gondermeyen dogrudan IP baglantilarla
+ * erisir. Somut alan adini (or. DNS sorgu adi "graph.instagram.com" veya SNI
+ * "i.instagram.com") cozumleyip IP katmanini ONCEDEN doldurunca, uygulama
+ * SNI gostermeden o IP'ye baglansa dahi trafik duser.
+ *
+ * Ayni (kurban,alan adi) cifti icin tekrar getaddrinfo yapmamak uzere
+ * onbelleklenir. sb_fw_lock, fw_block_ip cagrisindan ONCE birakilir. */
+static void sb_prime_resolve(const char *victim, const char *domain,
+                             const char *owner_ip, const char *owner_domain) {
+    if (!victim || !victim[0] || !domain || !domain[0]) return;
+    if (strcmp(domain, "*") == 0 || strcmp(victim, "*") == 0) return;
+
+    /* Cozumleme onbellegi: bu cift icin zaten calistiysak cik. */
+    char key[SB_IP_LEN + SB_DOMAIN_LEN + 2];
+    snprintf(key, sizeof(key), "%s|%s", victim, domain);
+    platform_mutex_lock(&sb_fw_lock);
+    for (int i = 0; i < sb_primed_count; i++) {
+        if (strcmp(sb_primed_key[i], key) == 0) {
+            platform_mutex_unlock(&sb_fw_lock);
+            return;
+        }
+    }
+    if (sb_primed_count < SB_PRIME_MAX)
+        strncpy(sb_primed_key[sb_primed_count++], key, sizeof(sb_primed_key[0]) - 1);
+    platform_mutex_unlock(&sb_fw_lock);
+
+    /* Bastaki joker/kok noktalari soy; icte kalan joker cozumlenemez. */
+    const char *base = domain;
+    while (*base == '*' || *base == '.') base++;
+    if (!base[0] || strchr(base, '*')) return;
+
     struct addrinfo hints, *res = NULL;
     memset(&hints, 0, sizeof(hints));
     hints.ai_family   = AF_INET;
@@ -1017,16 +1127,11 @@ void site_block_fw_prime(const char *owner_ip, const char *domain) {
             char ipbuf[INET_ADDRSTRLEN];
             struct sockaddr_in *sin = (struct sockaddr_in *)p->ai_addr;
             if (sin && inet_ntop(AF_INET, &sin->sin_addr, ipbuf, sizeof(ipbuf)))
-                site_block_fw_block_ip(owner_ip, ipbuf, owner_ip, domain);
+                site_block_fw_block_ip(victim, ipbuf, owner_ip, owner_domain);
         }
         freeaddrinfo(res);
     }
-
-    /* 2) DNS string DROP (udp/tcp 53) */
-    site_block_fw_block_dns(owner_ip, base, owner_ip, domain);
 }
-
-int site_block_fw_active(void) { return sb_fw_ready ? 1 : 0; }
 
 /* ==================================================================
  *   Gozle + uygula
@@ -1068,10 +1173,17 @@ void site_block_observe(const PacketRecord *pkt) {
     {
         const char *dstip = pkt->dst_ip;
         if (pkt->domain_kind == DOMAIN_KIND_DNS) {
+            /* Gozlemlenen sorgu adini HEM desen olarak duser HEM de cozumleyip
+             * elde edilen IP'leri kurariz (uygulama SNI gondermeden o IP'lere
+             * baglansa bile engellensin). */
+            sb_prime_resolve(victim, pkt->app_domain, rule.ip, rule.domain);
             if (is_udp)
                 site_block_fw_block_dns(victim, pkt->app_domain, rule.ip, rule.domain);
         } else if (dstip && dstip[0] && strcmp(dstip, victim) != 0) {
             site_block_fw_block_ip(victim, dstip, rule.ip, rule.domain);
+            /* SNI/QUIC/HTTP alan adinin tum A kayitlarini da kapat (ek IP'ler
+             * ayni uygulama tarafindan kullaniliyor olabilir). */
+            sb_prime_resolve(victim, pkt->app_domain, rule.ip, rule.domain);
         }
     }
 

@@ -220,8 +220,7 @@ yine açılır ancak pcap yakalama, raw tarama ve müdahale motorları sınırl�
 çalışır (yakalama `procfs` fallback'e düşer: yalnızca yerel soketler görünür).
 
 > **İlk adım:** Keşif bittikten sonra Kontrol Paneli'nde listede görünen
-> cihazları **TÜMÜNÜ EKLE** ile İzleme Listesi'ne alın; ardından Alarm
-> Merkezi'nden **Ağı İzle**'yi başlatın. Boş izleme listesiyle IDS pasif kalır.
+> cihazları **TÜMÜNÜ EKLE** ile İzleme Listesi'ne alın; ardından **Ağı İzle**'yi başlatın. Boş izleme listesiyle IDS pasif kalır.
 
 ### 6.2 Root modu — tam özellik seti (önerilen)
 

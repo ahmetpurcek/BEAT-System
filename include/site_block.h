@@ -36,7 +36,7 @@ enum {
 
 typedef struct {
     char ip[SB_IP_LEN];        /* hedef cihaz IP ("*" = tum cihazlar) */
-    char domain[SB_DOMAIN_LEN];/* "facebook.com", "*.youtube.com", "*" */
+    char domain[SB_DOMAIN_LEN];/* "facebook.com","*.youtube.com","*youtube.com","*youtube*","*" */
     int  mode;                 /* SB_MODE_* */
     int  enabled;
     unsigned long hits;

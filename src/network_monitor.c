@@ -1546,6 +1546,12 @@ static void handle_packet(const struct pcap_pkthdr *header, const u_char *packet
         /* Site karartma: kurban (bize ait olmayan) trafigini gozle ve kural
          * varsa DNS sinkhole / TCP RST ile uygula. */
         site_block_observe(&pkt);
+    } else if (own_local_out) {
+        /* Tek-makine senaryosu: kendi cikis trafigimiz (kaynak IP = kendi IP,
+         * or. Firefox DNS sorgusu / TLS ClientHello SNI). Kurban = kendi IP
+         * oldugu icin gozlem kaydedilir ve karartma yerel (loopback) teslimle
+         * uygulanir. */
+        site_block_observe(&pkt);
     }
 
     /* Eğer protokol hâlâ boşsa varsayılan ata */

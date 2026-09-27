@@ -19,8 +19,10 @@
 typedef int (*RawInjectSink)(void *ud, const unsigned char *frame, int len);
 
 typedef struct {
-    int           ok;                 /* 1 = kullanima hazir */
+    int           ok;                 /* 1 = AF_PACKET/Ethernet yolu kullanima hazir */
+    int           inited;             /* 1 = yapi init edildi (yerel yol icin yeterli) */
     int           fd;                 /* AF_PACKET soketi (Linux), -1 = kapali */
+    int           fd_inet;            /* AF_INET SOCK_RAW (yerel teslim icin), -1 = kapali */
     int           ifindex;
     char          iface[RI_IFACE_LEN];
     unsigned char own_mac[6];         /* kendi arayuz MAC'imiz */
@@ -63,6 +65,16 @@ int  raw_inject_ip(RawInject *ri,
                    const char *src_ip, const char *dst_ip,
                    unsigned char proto,
                    const unsigned char *payload, int payload_len);
+
+/* YEREL (loopback'e teslim) enjeksiyon: Ethernet cercevesi YOK.
+ * AF_INET SOCK_RAW + IP_HDRINCL ile IP datagramini gonderir. Hedef IP yerel
+ * makinenin kendi adresi oldugunda cekirdek paketi loopback'e teslim eder;
+ * boylece BEAT-System'in calistigi makinenin KENDI trafigi karartilabilir
+ * (managed-mode tek-makine senaryosu: DNS sinkhole / TCP RST). */
+int  raw_inject_send_ip(RawInject *ri,
+                        const char *src_ip, const char *dst_ip,
+                        unsigned char proto,
+                        const unsigned char *payload, int payload_len);
 
 /* ---- Dusuk seviye kurucular (birim test icin acik) ---- */
 

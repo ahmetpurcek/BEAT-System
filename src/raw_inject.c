@@ -11,6 +11,7 @@
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netinet/ip.h>
 
 #include <pcap.h>
 
@@ -202,6 +203,8 @@ int raw_inject_init(RawInject *ri, const char *iface) {
     if (!ri) return -1;
     memset(ri, 0, sizeof(*ri));
     ri->fd = -1;
+    ri->fd_inet = -1;
+    ri->inited = 1;   /* yerel (AF_INET) teslim yolu iface olmasa da kullanilabilir */
     if (!iface || !iface[0] || strcmp(iface, "any") == 0) return -1;
     strncpy(ri->iface, iface, RI_IFACE_LEN - 1);
 
@@ -238,7 +241,58 @@ void raw_inject_close(RawInject *ri) {
         close(ri->fd);
         ri->fd = -1;
     }
+    if (ri->fd_inet >= 0) {
+        close(ri->fd_inet);
+        ri->fd_inet = -1;
+    }
     ri->ok = 0;
+}
+
+/* YEREL enjeksiyon: AF_INET SOCK_RAW + IP_HDRINCL. Hedef IP yerel oldugunda
+ * cekirdek datagrami loopback'e teslim eder -> kendi makinemizin trafigi
+ * (DNS sinkhole / TCP RST) gercekten karartilabilir. */
+int raw_inject_send_ip(RawInject *ri, const char *src_ip, const char *dst_ip,
+                       unsigned char proto,
+                       const unsigned char *payload, int payload_len) {
+    if (!ri || !src_ip || !dst_ip || !payload || payload_len <= 0) return -1;
+
+    if (ri->sink) {
+        /* Yalitilmis test: sifir MAC'li cerceve olarak sink'e ver */
+        unsigned char frame[14 + 20 + 4096];
+        if (20 + payload_len > (int)sizeof(frame) - 14) return -1;
+        memset(frame, 0, 12);
+        frame[12] = 0x08; frame[13] = 0x00;
+        int n = ri_build_ipv4(frame + 14, (int)sizeof(frame) - 14,
+                              src_ip, dst_ip, proto, payload, payload_len);
+        if (n < 0) return -1;
+        return ri->sink(ri->sink_ud, frame, 14 + n);
+    }
+
+    if (!ri->inited) return -1;
+    if (ri->fd_inet < 0) {
+        int fd = socket(AF_INET, SOCK_RAW, IPPROTO_RAW);
+        if (fd < 0) return -1;
+        int on = 1;
+        if (setsockopt(fd, IPPROTO_IP, IP_HDRINCL, &on, sizeof(on)) != 0) {
+            close(fd);
+            return -1;
+        }
+        ri->fd_inet = fd;
+    }
+
+    unsigned char buf[20 + 4096];
+    int n = ri_build_ipv4(buf, (int)sizeof(buf), src_ip, dst_ip, proto,
+                          payload, payload_len);
+    if (n < 0) return -1;
+
+    struct sockaddr_in din;
+    memset(&din, 0, sizeof(din));
+    din.sin_family = AF_INET;
+    if (inet_pton(AF_INET, dst_ip, &din.sin_addr) != 1) return -1;
+
+    ssize_t r = sendto(ri->fd_inet, buf, (size_t)n, 0,
+                       (struct sockaddr *)&din, sizeof(din));
+    return (r == (ssize_t)n) ? 0 : -1;
 }
 
 int raw_inject_send(RawInject *ri, const unsigned char *frame, int len) {
@@ -262,6 +316,7 @@ int raw_inject_init(RawInject *ri, const char *iface) {
     if (!ri) return -1;
     memset(ri, 0, sizeof(*ri));
     ri->fd = -1;
+    ri->fd_inet = -1;
     if (!iface || !iface[0]) return -1;
     strncpy(ri->iface, iface, RI_IFACE_LEN - 1);
     char errbuf[PCAP_ERRBUF_SIZE] = {0};
@@ -286,6 +341,15 @@ int raw_inject_send(RawInject *ri, const unsigned char *frame, int len) {
     if (ri->sink) return ri->sink(ri->sink_ud, frame, len);   /* yalitilmis test */
     if (!ri->ok || !ri->pcap) return -1;
     return (pcap_inject((pcap_t *)ri->pcap, frame, (size_t)len) == len) ? 0 : -1;
+}
+
+/* Linux disi platformlarda yerel loopback enjeksiyonu desteklenmez. */
+int raw_inject_send_ip(RawInject *ri, const char *src_ip, const char *dst_ip,
+                       unsigned char proto,
+                       const unsigned char *payload, int payload_len) {
+    (void)ri; (void)src_ip; (void)dst_ip; (void)proto;
+    (void)payload; (void)payload_len;
+    return -1;
 }
 
 #endif

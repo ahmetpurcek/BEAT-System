@@ -18,6 +18,13 @@
 #include <string.h>
 #include <strings.h>
 #include <time.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <sys/wait.h>
+#include <netdb.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
 
 /* ==================================================================
  *   Durum
@@ -53,6 +60,28 @@ static RawInjectSink sb_test_sink = NULL;
 static void *sb_test_sink_ud = NULL;
 static int   sb_test_raw_ok = 0;
 
+/* ==================================================================
+ *   Cekirdek (iptables) deterministik katman — durum
+ * ================================================================== */
+#define SB_FW_CHAIN "BEAT_SB"
+#define SB_FW_MAX   1024
+
+enum { SB_FW_KIND_IP = 0, SB_FW_KIND_DNS = 1 };
+
+typedef struct {
+    char victim[SB_IP_LEN];        /* somut kurban IP'si */
+    char arg[SB_DOMAIN_LEN];       /* bloklanan IP (IP) veya alan adi (DNS) */
+    char owner_ip[SB_IP_LEN];      /* bu kurali ureten SiteBlockRule.ip */
+    char owner_domain[SB_DOMAIN_LEN]; /* ureten SiteBlockRule.domain */
+    int  kind;                     /* SB_FW_KIND_* */
+} SbFwEnt;
+
+static SbFwEnt sb_fw[SB_FW_MAX];
+static int  sb_fw_count = 0;
+static int  sb_fw_ready = 0;
+static platform_mutex_t sb_fw_lock;
+static const char *sb_ipt_bin = NULL;
+
 static double sb_now(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -82,13 +111,21 @@ void site_block_init(void) {
     sb_iface[0] = '\0';
     sb_enabled = 1;
     strncpy(sb_sinkhole_ip, "0.0.0.0", sizeof(sb_sinkhole_ip) - 1);
+    memset(sb_fw, 0, sizeof(sb_fw));
+    sb_fw_count = 0;
+    sb_fw_ready = 0;
+    sb_ipt_bin = NULL;
     platform_mutex_init(&sb_lock);
+    platform_mutex_init(&sb_fw_lock);
     sb_inited = 1;
 }
 
 void site_block_cleanup(void) {
     if (!sb_inited) return;
+    /* Cekirdek kurallarini kaldir + zinciri temizle (yetim kural birakma) */
+    site_block_fw_cleanup();
     raw_inject_close(&sb_ri);
+    platform_mutex_destroy(&sb_fw_lock);
     platform_mutex_destroy(&sb_lock);
     sb_inited = 0;
 }
@@ -164,6 +201,8 @@ int site_block_raw_ready(void) {
 void site_block_set_enabled(int on) {
     if (!sb_inited) site_block_init();
     sb_enabled = on ? 1 : 0;
+    /* Karartma kapatilinca cekirdek kurallarini da kaldir: net erisim geri gelsin */
+    if (!sb_enabled) site_block_fw_clear();
 }
 int site_block_is_enabled(void) {
     if (!sb_inited) return 0;
@@ -208,6 +247,9 @@ void site_block_clear_scope(void) {
 
 int site_block_scope_contains(const char *ip) {
     if (!ip || !ip[0]) return 0;
+    /* Kendi makinemizin IP'si her zaman kapsam icindedir: tek-makine
+     * (managed-mode) senaryosunda kendi trafigimizi de karartabilmek icin. */
+    if (sb_own_ip[0] && strcmp(ip, sb_own_ip) == 0) return 1;
     if (sb_scope_count == 0) return 1;         /* bos kapsam = tum ag */
     for (int i = 0; i < sb_scope_count; i++)
         if (strcmp(sb_scope[i], ip) == 0) return 1;
@@ -236,6 +278,9 @@ static int sb_valid_mode(int mode) {
     return (mode == SB_MODE_SINKHOLE || mode == SB_MODE_RST || mode == SB_MODE_BOTH) ? 1 : 0;
 }
 
+/* sb_lock tutulurken cagrilir; sb_domain_match kilit almaz (guvenli). */
+static void sb_refresh_obs_blocked(void);
+
 int site_block_add_rule(const char *ip, const char *domain, int mode) {
     if (!sb_inited) site_block_init();
     if (!domain || !domain[0]) return -1;
@@ -252,6 +297,7 @@ int site_block_add_rule(const char *ip, const char *domain, int mode) {
         if (strcmp(sb_rules[i].ip, ip) == 0 && strcmp(sb_rules[i].domain, ndom) == 0) {
             sb_rules[i].mode = mode;
             sb_rules[i].enabled = 1;
+            sb_refresh_obs_blocked();
             platform_mutex_unlock(&sb_lock);
             return i;
         }
@@ -265,6 +311,16 @@ int site_block_add_rule(const char *ip, const char *domain, int mode) {
     r->enabled = 1;
     int idx = sb_rule_count++;
     platform_mutex_unlock(&sb_lock);
+
+    /* Cekirdek katmanini ONLEYICI olarak kur: kural eklendigi andan itibaren
+     * (kurban ilk paketi gondermese bile) engelleme aktif olur. */
+    site_block_fw_prime(ip, ndom);
+
+    /* Gozlem kayitlarinin blocked bayraklarini tazele: yeni kural wildcard
+     * (ornek "*" veya "*.x") ise eski gozlemler de kirmizi gostermeli. */
+    platform_mutex_lock(&sb_lock);
+    sb_refresh_obs_blocked();
+    platform_mutex_unlock(&sb_lock);
     return idx;
 }
 
@@ -272,8 +328,17 @@ int site_block_remove_rule(int index) {
     if (!sb_inited) site_block_init();
     platform_mutex_lock(&sb_lock);
     if (index < 0 || index >= sb_rule_count) { platform_mutex_unlock(&sb_lock); return -1; }
+    char rip[SB_IP_LEN], rdom[SB_DOMAIN_LEN];
+    strncpy(rip, sb_rules[index].ip, SB_IP_LEN - 1); rip[SB_IP_LEN - 1] = '\0';
+    strncpy(rdom, sb_rules[index].domain, SB_DOMAIN_LEN - 1); rdom[SB_DOMAIN_LEN - 1] = '\0';
     for (int i = index; i < sb_rule_count - 1; i++) sb_rules[i] = sb_rules[i + 1];
     sb_rule_count--;
+    platform_mutex_unlock(&sb_lock);
+    /* Bu kuralin kurdugu cekirdek DROP kurallarini kaldir */
+    site_block_fw_unblock_domain(rip, rdom);
+    /* Kural silindigi icin eslesen gozlemlerin blocked bayragini temizle */
+    platform_mutex_lock(&sb_lock);
+    sb_refresh_obs_blocked();
     platform_mutex_unlock(&sb_lock);
     return 0;
 }
@@ -282,6 +347,12 @@ void site_block_clear_rules(void) {
     if (!sb_inited) site_block_init();
     platform_mutex_lock(&sb_lock);
     sb_rule_count = 0;
+    platform_mutex_unlock(&sb_lock);
+    /* Tum cekirdek kurallarini temizle */
+    site_block_fw_clear();
+    /* Tum gozlemler artik engelsiz */
+    platform_mutex_lock(&sb_lock);
+    sb_refresh_obs_blocked();
     platform_mutex_unlock(&sb_lock);
 }
 
@@ -308,6 +379,24 @@ static int sb_domain_match(const char *rule, const char *domain) {
     if (dl > bl && strcmp(domain + (dl - bl), base) == 0 && domain[dl - bl - 1] == '.')
         return 1;
     return 0;
+}
+
+/* sb_lock tutulurken cagrilir: tum gozlem kayitlarinin blocked bayragini
+ * mevcut kurallara gore YENIDEN hesaplar. Kural ekleme/silme sonrasi eski
+ * gozlemlerin kirmizi/kirmizi-degil durumu aninda dogru olur. */
+static void sb_refresh_obs_blocked(void) {
+    for (int i = 0; i < sb_obs_count; i++) {
+        SiteBlockObs *o = &sb_obs[i];
+        int blocked = 0;
+        for (int j = 0; j < sb_rule_count && !blocked; j++) {
+            SiteBlockRule *r = &sb_rules[j];
+            if (!r->enabled) continue;
+            if (strcmp(r->ip, "*") != 0 && strcmp(r->ip, o->ip) != 0) continue;
+            if (!sb_domain_match(r->domain, o->domain)) continue;
+            blocked = 1;
+        }
+        o->blocked = blocked;
+    }
 }
 
 int site_block_match(const char *ip, const char *domain, SiteBlockRule *out) {
@@ -398,13 +487,53 @@ void site_block_clear_observations(void) {
 int site_block_block_observed(const char *ip, const char *domain, int mode) {
     int r = site_block_add_rule(ip, domain, mode);
     if (r >= 0) {
-        platform_mutex_lock(&sb_lock);
-        for (int i = 0; i < sb_obs_count; i++)
-            if (strcmp(sb_obs[i].ip, ip) == 0 && strcmp(sb_obs[i].domain, domain) == 0)
-                sb_obs[i].blocked = 1;
-        platform_mutex_unlock(&sb_lock);
+        /* add_rule zaten sb_refresh_obs_blocked() cagirdi; wildcard kurallar
+         * dahil tum eslesen gozlemler kirmizi isaretlenir. */
     }
     return r;
+}
+
+/* Bir gozlem satirinin "Ac" (engeli kaldir) islemi: (ip, domain) ile
+ * ESLEMEN tum kurallari kaldirir — wildcard kurallar ("*", "*.x") dahil.
+ * Baska cihazlarin ayni alan adi kurallarina dokunmaz. Kaldirilan her kuralin
+ * cekirdek (iptables) girdileri de temizlenir ve gozlem bayraklari tazelenir.
+ * Kaldirilan kural sayisini dondurur (0 = eslesen kural yoktu). */
+int site_block_unblock_observed(const char *ip, const char *domain) {
+    if (!sb_inited) site_block_init();
+    if (!domain || !domain[0]) return -1;
+    char ndom[SB_DOMAIN_LEN];
+    sb_norm_domain(domain, ndom, sizeof(ndom));
+    if (!ndom[0]) return -1;
+    const char *qip = (ip && ip[0]) ? ip : "*";
+
+    char rip[SB_MAX_RULES][SB_IP_LEN];
+    char rdom[SB_MAX_RULES][SB_DOMAIN_LEN];
+    int nrem = 0;
+
+    platform_mutex_lock(&sb_lock);
+    for (int i = 0; i < sb_rule_count; ) {
+        SiteBlockRule *r = &sb_rules[i];
+        int match = r->enabled &&
+                    (strcmp(r->ip, "*") == 0 || strcmp(r->ip, qip) == 0) &&
+                    sb_domain_match(r->domain, ndom);
+        if (!match) { i++; continue; }
+        if (nrem < SB_MAX_RULES) {
+            strncpy(rip[nrem], r->ip, SB_IP_LEN - 1);
+            rip[nrem][SB_IP_LEN - 1] = '\0';
+            strncpy(rdom[nrem], r->domain, SB_DOMAIN_LEN - 1);
+            rdom[nrem][SB_DOMAIN_LEN - 1] = '\0';
+            nrem++;
+        }
+        for (int k = i; k < sb_rule_count - 1; k++) sb_rules[k] = sb_rules[k + 1];
+        sb_rule_count--;
+        /* i'yi artirma: kaydirilan kural ayni indekse geldi */
+    }
+    sb_refresh_obs_blocked();
+    platform_mutex_unlock(&sb_lock);
+
+    for (int j = 0; j < nrem; j++)
+        site_block_fw_unblock_domain(rip[j], rdom[j]);
+    return nrem;
 }
 
 void site_block_get_stats(SiteBlockStats *s) {
@@ -414,6 +543,16 @@ void site_block_get_stats(SiteBlockStats *s) {
     s->enabled = sb_enabled;
     s->raw_ready = site_block_raw_ready();
     s->scope_count = sb_scope_count;
+    s->fw_ready = sb_fw_ready;
+    /* Aktif cekirdek kural sayilarini (tur bazli) gercek listeden hesapla */
+    unsigned long nip = 0, ndns = 0;
+    platform_mutex_lock(&sb_fw_lock);
+    for (int i = 0; i < sb_fw_count; i++) {
+        if (sb_fw[i].kind == SB_FW_KIND_IP) nip++; else ndns++;
+    }
+    platform_mutex_unlock(&sb_fw_lock);
+    s->fw_ip_rules = nip;
+    s->fw_dns_rules = ndns;
 }
 
 /* ==================================================================
@@ -435,10 +574,15 @@ static int sb_pkt_has_layer(const PacketRecord *pkt, PduLayerType t) {
     return 0;
 }
 
+/* Kurban IP'si bu makinenin kendi IP'si mi? (tek-makine senaryosu) */
+static int sb_is_own_ip(const char *ip) {
+    return ip && ip[0] && sb_own_ip[0] && strcmp(ip, sb_own_ip) == 0;
+}
+
 /* ---- DNS sinkhole: sahte yanit uret ve kurban'a gonder ---- */
-static int sb_enforce_dns_sinkhole(const PacketRecord *pkt) {
+static int sb_enforce_dns_sinkhole(const PacketRecord *pkt, int local) {
     if (pkt->dns_msg_len < 12 || pkt->dns_msg_len > DNS_MSG_MAX) return -1;
-    if (!pkt->src_mac[0] || !sb_own_mac_valid) return -1;
+    if (!local && (!pkt->src_mac[0] || !sb_own_mac_valid)) return -1;
 
     unsigned char resp[DNS_MSG_MAX + 32];
     int qlen = pkt->dns_msg_len;
@@ -464,54 +608,74 @@ static int sb_enforce_dns_sinkhole(const PacketRecord *pkt) {
     resp[p++] = (unsigned char)(c & 0xFF);
     resp[p++] = (unsigned char)(d & 0xFF);
 
-    unsigned char dst_mac[6];
-    if (sb_parse_mac(pkt->src_mac, dst_mac) != 0) return -1;
-
     unsigned short sport = (unsigned short)atoi(pkt->dst_port);  /* 53 */
     unsigned short dport = (unsigned short)atoi(pkt->src_port);  /* ephemeral */
     if (sport == 0) sport = 53;
     if (dport == 0) return -1;
 
     /* Yanit: sunucu (pkt->dst_ip:53) -> istemci (pkt->src_ip:ephemeral) */
-    int r = raw_inject_udp(&sb_ri, dst_mac, sb_own_mac,
+    int r;
+    if (local) {
+        /* Yerel teslim: Ethernet yok; cekirdek loopback'e birakir. */
+        unsigned char l4[4096];
+        int n = ri_build_udp(l4, (int)sizeof(l4), pkt->dst_ip, pkt->src_ip,
+                             sport, dport, resp, p);
+        r = (n < 0) ? -1
+                    : raw_inject_send_ip(&sb_ri, pkt->dst_ip, pkt->src_ip, 17, l4, n);
+    } else {
+        unsigned char dst_mac[6];
+        if (sb_parse_mac(pkt->src_mac, dst_mac) != 0) return -1;
+        r = raw_inject_udp(&sb_ri, dst_mac, sb_own_mac,
                            pkt->dst_ip, pkt->src_ip, sport, dport, resp, p);
+    }
     if (r == 0) { sb_stats.sinkholed++; sb_stats.sent_total++; }
     return r;
 }
 
 /* ---- TCP RST: kurbanin baglantisini dusur ---- */
-static int sb_enforce_rst(const PacketRecord *pkt) {
-    if (!pkt->src_mac[0] || !sb_own_mac_valid) return -1;
-    unsigned char dst_mac[6];
-    if (sb_parse_mac(pkt->src_mac, dst_mac) != 0) return -1;
+static int sb_enforce_rst(const PacketRecord *pkt, int local) {
+    if (!local && (!pkt->src_mac[0] || !sb_own_mac_valid)) return -1;
 
     unsigned short sport = (unsigned short)atoi(pkt->dst_port);
     unsigned short dport = (unsigned short)atoi(pkt->src_port);
     if (sport == 0 || dport == 0) return -1;
 
     /* Sunucu -> istemci RST (istemcinin soketini dusurur) */
-    int r = raw_inject_tcp(&sb_ri, dst_mac, sb_own_mac,
+    int r;
+    if (local) {
+        unsigned char l4[4096];
+        int n = ri_build_tcp(l4, (int)sizeof(l4), pkt->dst_ip, pkt->src_ip,
+                             sport, dport, pkt->tcp_ack, pkt->tcp_seq,
+                             0x14 /* RST|ACK */, NULL, 0);
+        r = (n < 0) ? -1
+                    : raw_inject_send_ip(&sb_ri, pkt->dst_ip, pkt->src_ip, 6, l4, n);
+    } else {
+        unsigned char dst_mac[6];
+        if (sb_parse_mac(pkt->src_mac, dst_mac) != 0) return -1;
+        r = raw_inject_tcp(&sb_ri, dst_mac, sb_own_mac,
                            pkt->dst_ip, pkt->src_ip, sport, dport,
                            pkt->tcp_ack, pkt->tcp_seq, 0x14 /* RST|ACK */,
                            NULL, 0);
+    }
     if (r == 0) { sb_stats.rst_sent++; sb_stats.sent_total++; }
 
-    /* Istege bagli: istemci -> sunucu RST (gateway MAC'i biliniyorsa) */
-    if (sb_gw_mac_valid) {
-        int r2 = raw_inject_tcp(&sb_ri, sb_gw_mac, sb_own_mac,
-                                pkt->src_ip, pkt->dst_ip, dport, sport,
-                                pkt->tcp_seq, pkt->tcp_ack, 0x04 /* RST */,
-                                NULL, 0);
-        if (r2 == 0) { sb_stats.rst_sent++; sb_stats.sent_total++; }
+    /* Istege bagli: istemci -> sunucu RST (gateway MAC'i biliniyorsa; yerel modda gerek yok) */
+    if (!local && sb_gw_mac_valid) {
+        unsigned char dst_mac[6];
+        if (sb_parse_mac(pkt->src_mac, dst_mac) == 0) {
+            int r2 = raw_inject_tcp(&sb_ri, sb_gw_mac, sb_own_mac,
+                                    pkt->src_ip, pkt->dst_ip, dport, sport,
+                                    pkt->tcp_seq, pkt->tcp_ack, 0x04 /* RST */,
+                                    NULL, 0);
+            if (r2 == 0) { sb_stats.rst_sent++; sb_stats.sent_total++; }
+        }
     }
     return r;
 }
 
 /* ---- QUIC: ICMP port unreachable ile istemciyi TCP/TLS'e zorla ---- */
-static int sb_enforce_quic_icmp(const PacketRecord *pkt) {
-    if (!pkt->src_mac[0] || !sb_own_mac_valid) return -1;
-    unsigned char dst_mac[6];
-    if (sb_parse_mac(pkt->src_mac, dst_mac) != 0) return -1;
+static int sb_enforce_quic_icmp(const PacketRecord *pkt, int local) {
+    if (!local && (!pkt->src_mac[0] || !sb_own_mac_valid)) return -1;
 
     unsigned short sport = (unsigned short)atoi(pkt->src_port);
     unsigned short dport = (unsigned short)atoi(pkt->dst_port);
@@ -538,12 +702,331 @@ static int sb_enforce_quic_icmp(const PacketRecord *pkt) {
     memcpy(icmp + 8, orig, (size_t)ol);
 
     /* Sunucu -> istemci ICMP */
-    int r = raw_inject_ip(&sb_ri, dst_mac, sb_own_mac,
+    int r;
+    if (local) {
+        r = raw_inject_send_ip(&sb_ri, pkt->dst_ip, pkt->src_ip, 1 /* ICMP */,
+                               icmp, 8 + ol);
+    } else {
+        unsigned char dst_mac[6];
+        if (sb_parse_mac(pkt->src_mac, dst_mac) != 0) return -1;
+        r = raw_inject_ip(&sb_ri, dst_mac, sb_own_mac,
                           pkt->dst_ip, pkt->src_ip, 1 /* ICMP */,
                           icmp, 8 + ol);
+    }
     if (r == 0) { sb_stats.icmp_sent++; sb_stats.sent_total++; }
     return r;
 }
+
+/* ==================================================================
+ *   Cekirdek (iptables) deterministik katman
+ * ==================================================================
+ *
+ * Reaktif enjeksiyon "forward" ile YARISA girer: sahte DNS yaniti / RST
+ * kurban paketi yola ciktiktan SONRA uretilir, bu yuzden gercek yanit
+ * cogu zaman kazanir -> aralikli engelleme. Bu katman cekirdekte DROP
+ * kurarak yarisi tamamen ortadan kaldirir:
+ *
+ *   - DNS (udp/tcp 53) : kurbanin ilgili alan adi sorgusu dusurulur;
+ *                        boylece gercek yanit hic uretilmez -> sinkhole
+ *                        her zaman kazanir.
+ *   - SNI/HTTP/QUIC    : kurban <-> sunucu IP cifti (iki yon) dusurulur;
+ *                        TLS/QUIC akisi hic gecmez.
+ *
+ * Tek kullanici zinciri (BEAT_SB) FORWARD + INPUT + OUTPUT'a takilir:
+ *   - FORWARD : ARP-spoof MITM altindaki kurban trafigi (victim != kendi IP)
+ *   - OUTPUT  : kendi makinemiz hedef oldugunda giden trafik
+ *   - INPUT   : kendi makinemiz hedef oldugunda gelen trafik
+ */
+
+static const char *sb_ipt_path(void) {
+    if (sb_ipt_bin) return sb_ipt_bin;
+    static const char *cand[] = {
+        "/usr/sbin/iptables", "/sbin/iptables",
+        "/usr/bin/iptables",  "/bin/iptables",
+        "iptables", NULL
+    };
+    for (int i = 0; cand[i]; i++) {
+        if (strchr(cand[i], '/')) {
+            if (access(cand[i], X_OK) == 0) { sb_ipt_bin = cand[i]; return sb_ipt_bin; }
+        } else {
+            /* PATH uzerinden: execvp cozer */
+            sb_ipt_bin = cand[i];
+            return sb_ipt_bin;
+        }
+    }
+    return "iptables";
+}
+
+/* iptables komutunu calistir (fork+exec; kabuk yok -> injection yok) */
+static int sb_exec(char *const argv[]) {
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        int dn = open("/dev/null", O_RDWR);
+        if (dn >= 0) { dup2(dn, 1); dup2(dn, 2); if (dn > 2) close(dn); }
+        execv(argv[0], argv);
+        _exit(127);
+    }
+    int st = 0;
+    if (waitpid(pid, &st, 0) < 0) return -1;
+    if (!WIFEXITED(st)) return -1;
+    return WEXITSTATUS(st);
+}
+
+/* argv[0] yerine cozumlenen iptables yolunu koyan yardimci kurucular */
+
+int site_block_fw_init(void) {
+    if (!sb_inited) site_block_init();
+    const char *bin = sb_ipt_path();
+
+    platform_mutex_lock(&sb_fw_lock);
+
+    /* Zincir olustur (varsa hata yok), sonra temizle: yetim kurallari sil */
+    { char *a[] = {(char*)bin, "-N", SB_FW_CHAIN, NULL}; sb_exec(a); }
+    { char *a[] = {(char*)bin, "-F", SB_FW_CHAIN, NULL}; sb_exec(a); }
+
+    /* Atlamalar: FORWARD/INPUT/OUTPUT (yoksa ekle) */
+    const char *parents[] = { "FORWARD", "INPUT", "OUTPUT" };
+    for (int i = 0; i < 3; i++) {
+        char *chk[] = {(char*)bin, "-C", (char*)parents[i], "-j", SB_FW_CHAIN, NULL};
+        if (sb_exec(chk) != 0) {
+            char *add[] = {(char*)bin, "-I", (char*)parents[i], "1", "-j", SB_FW_CHAIN, NULL};
+            sb_exec(add);
+        }
+    }
+
+    sb_fw_count = 0;
+    sb_fw_ready = 1;
+    sb_stats.fw_ready = 1;
+    platform_mutex_unlock(&sb_fw_lock);
+    fprintf(stderr, "[SITE_BLOCK] Cekirdek katman hazir (%s, zincir %s)\n", bin, SB_FW_CHAIN);
+    return 0;
+}
+
+void site_block_fw_cleanup(void) {
+    if (!sb_inited) return;
+    const char *bin = sb_ipt_path();
+
+    platform_mutex_lock(&sb_fw_lock);
+    const char *parents[] = { "FORWARD", "INPUT", "OUTPUT" };
+    for (int i = 0; i < 3; i++) {
+        char *a[] = {(char*)bin, "-D", (char*)parents[i], "-j", SB_FW_CHAIN, NULL};
+        sb_exec(a);
+    }
+    { char *a[] = {(char*)bin, "-F", SB_FW_CHAIN, NULL}; sb_exec(a); }
+    { char *a[] = {(char*)bin, "-X", SB_FW_CHAIN, NULL}; sb_exec(a); }
+    sb_fw_count = 0;
+    sb_fw_ready = 0;
+    sb_stats.fw_ready = 0;
+    platform_mutex_unlock(&sb_fw_lock);
+}
+
+/* sb_fw_lock tutulurken cagrilir */
+static int sb_fw_find(const char *victim, const char *arg, int kind) {
+    for (int i = 0; i < sb_fw_count; i++) {
+        if (sb_fw[i].kind == kind &&
+            strcmp(sb_fw[i].victim, victim) == 0 &&
+            strcmp(sb_fw[i].arg, arg) == 0)
+            return i;
+    }
+    return -1;
+}
+
+static void sb_fw_store(const char *victim, const char *arg, int kind,
+                        const char *owner_ip, const char *owner_domain) {
+    if (sb_fw_count >= SB_FW_MAX) return;
+    SbFwEnt *e = &sb_fw[sb_fw_count++];
+    memset(e, 0, sizeof(*e));
+    strncpy(e->victim, victim, SB_IP_LEN - 1);
+    strncpy(e->arg, arg, SB_DOMAIN_LEN - 1);
+    strncpy(e->owner_ip, owner_ip ? owner_ip : "*", SB_IP_LEN - 1);
+    strncpy(e->owner_domain, owner_domain ? owner_domain : "*", SB_DOMAIN_LEN - 1);
+    e->kind = kind;
+}
+
+int site_block_fw_block_ip(const char *victim, const char *ip,
+                           const char *owner_ip, const char *owner_domain) {
+    if (!victim || !victim[0] || !ip || !ip[0]) return -1;
+    if (!sb_inited) site_block_init();
+    const char *bin = sb_ipt_path();
+
+    platform_mutex_lock(&sb_fw_lock);
+    if (!sb_fw_ready) { platform_mutex_unlock(&sb_fw_lock); site_block_fw_init(); platform_mutex_lock(&sb_fw_lock); }
+    if (sb_fw_find(victim, ip, SB_FW_KIND_IP) >= 0) { platform_mutex_unlock(&sb_fw_lock); return 0; }
+
+    char *a[] = {(char*)bin, "-A", SB_FW_CHAIN, "-s", (char*)victim, "-d", (char*)ip,
+                 "-j", "DROP", NULL};
+    if (sb_exec(a) != 0) { platform_mutex_unlock(&sb_fw_lock); return -1; }
+
+    char *b[] = {(char*)bin, "-A", SB_FW_CHAIN, "-s", (char*)ip, "-d", (char*)victim,
+                 "-j", "DROP", NULL};
+    if (sb_exec(b) != 0) {
+        char *roll[] = {(char*)bin, "-D", SB_FW_CHAIN, "-s", (char*)victim, "-d", (char*)ip,
+                        "-j", "DROP", NULL};
+        sb_exec(roll);
+        platform_mutex_unlock(&sb_fw_lock);
+        return -1;
+    }
+
+    sb_fw_store(victim, ip, SB_FW_KIND_IP, owner_ip, owner_domain);
+    sb_stats.fw_ip_rules = (unsigned long)sb_fw_count;
+    __sync_fetch_and_add(&sb_stats.fw_events, 1);
+    platform_mutex_unlock(&sb_fw_lock);
+    return 0;
+}
+
+/* DNS tel formati (wire) etiketleri uzunluk-onekli kodlar: "example.com"
+ * telde '\x07example\x03com' seklinde gorunur; nokta KARAKTERI yoktur. Bu yuzden
+ * duz '--string "example.com"' hicbir sorguya uymaz. Asagidaki yardimci, alan adini
+ * '|07|example|03|com|00|' biciminde hex-string desenine cevirir. */
+static int sb_dns_hexpattern(const char *domain, char *out, size_t outsz) {
+    if (!domain || !domain[0] || !out || outsz < 16) return -1;
+    size_t o = 0;
+    const char *p = domain;
+    while (*p == '*' || *p == '.') p++;   /* joker/kok nokta temizligi */
+    while (*p) {
+        const char *dot = strchr(p, '.');
+        size_t len = dot ? (size_t)(dot - p) : strlen(p);
+        if (len == 0) { if (!dot) break; p = dot + 1; continue; }
+        if (len > 63) return -1;          /* gecersiz DNS etiketi */
+        int n = snprintf(out + o, outsz - o, "|%02x|", (unsigned)len);
+        if (n < 0 || (size_t)n >= outsz - o) return -1;
+        o += (size_t)n;
+        for (size_t k = 0; k < len; k++) {
+            unsigned char c = (unsigned char)p[k];
+            if (c >= 'A' && c <= 'Z') c = (unsigned char)(c - 'A' + 'a');
+            if (o + 1 >= outsz) return -1;
+            out[o++] = (char)c;
+        }
+        if (!dot) break;
+        p = dot + 1;
+    }
+    if (o + 4 >= outsz) return -1;
+    memcpy(out + o, "|00|", 4); o += 4;
+    out[o] = '\0';
+    return 0;
+}
+
+int site_block_fw_block_dns(const char *victim, const char *domain,
+                            const char *owner_ip, const char *owner_domain) {
+    if (!victim || !victim[0] || !domain || !domain[0]) return -1;
+    if (strcmp(domain, "*") == 0) return -1;   /* joker: string eslesmesi yok */
+    if (strcmp(victim, "*") == 0) return -1;   /* kaynak-bazli kural gerekir */
+    if (!sb_inited) site_block_init();
+    const char *bin = sb_ipt_path();
+
+    platform_mutex_lock(&sb_fw_lock);
+    if (!sb_fw_ready) { platform_mutex_unlock(&sb_fw_lock); site_block_fw_init(); platform_mutex_lock(&sb_fw_lock); }
+    if (sb_fw_find(victim, domain, SB_FW_KIND_DNS) >= 0) { platform_mutex_unlock(&sb_fw_lock); return 0; }
+
+    char pat[1024];
+    if (sb_dns_hexpattern(domain, pat, sizeof(pat)) != 0) {
+        platform_mutex_unlock(&sb_fw_lock);
+        return -1;
+    }
+
+    const char *protos[] = { "udp", "tcp" };
+    int ok = 0;
+    for (int i = 0; i < 2; i++) {
+        char *a[] = {(char*)bin, "-A", SB_FW_CHAIN, "-s", (char*)victim, "-p", (char*)protos[i],
+                     "--dport", "53", "-m", "string", "--hex-string", pat,
+                     "--algo", "bm", "-j", "DROP", NULL};
+        if (sb_exec(a) == 0) ok = i + 1;
+    }
+    if (!ok) { platform_mutex_unlock(&sb_fw_lock); return -1; }
+
+    sb_fw_store(victim, domain, SB_FW_KIND_DNS, owner_ip, owner_domain);
+    sb_stats.fw_dns_rules = (unsigned long)sb_fw_count;
+    __sync_fetch_and_add(&sb_stats.fw_events, 1);
+    platform_mutex_unlock(&sb_fw_lock);
+    return 0;
+}
+
+/* sb_fw_lock tutulurken cagrilir; i'inci girdiyi cekirdekten ve listeden sil */
+static void sb_fw_del_at(int i) {
+    const char *bin = sb_ipt_path();
+    SbFwEnt *e = &sb_fw[i];
+    if (e->kind == SB_FW_KIND_IP) {
+        char *a[] = {(char*)bin, "-D", SB_FW_CHAIN, "-s", e->victim, "-d", e->arg,
+                     "-j", "DROP", NULL};
+        sb_exec(a);
+        char *b[] = {(char*)bin, "-D", SB_FW_CHAIN, "-s", e->arg, "-d", e->victim,
+                     "-j", "DROP", NULL};
+        sb_exec(b);
+    } else {
+        const char *protos[] = { "udp", "tcp" };
+        char pat[1024];
+        if (sb_dns_hexpattern(e->arg, pat, sizeof(pat)) != 0) pat[0] = '\0';
+        for (int j = 0; j < 2 && pat[0]; j++) {
+            char *a[] = {(char*)bin, "-D", SB_FW_CHAIN, "-s", e->victim, "-p", (char*)protos[j],
+                         "--dport", "53", "-m", "string", "--hex-string", pat,
+                         "--algo", "bm", "-j", "DROP", NULL};
+            sb_exec(a);
+        }
+    }
+    for (int k = i; k < sb_fw_count - 1; k++) sb_fw[k] = sb_fw[k + 1];
+    sb_fw_count--;
+}
+
+void site_block_fw_unblock_domain(const char *owner_ip, const char *owner_domain) {
+    if (!sb_inited || !sb_fw_ready) return;
+    const char *oip = (owner_ip && owner_ip[0]) ? owner_ip : "*";
+    platform_mutex_lock(&sb_fw_lock);
+    for (int i = sb_fw_count - 1; i >= 0; i--) {
+        if (strcmp(sb_fw[i].owner_ip, oip) == 0 &&
+            strcmp(sb_fw[i].owner_domain, owner_domain ? owner_domain : "*") == 0)
+            sb_fw_del_at(i);
+    }
+    sb_stats.fw_ip_rules = (unsigned long)sb_fw_count;
+    sb_stats.fw_dns_rules = (unsigned long)sb_fw_count;
+    platform_mutex_unlock(&sb_fw_lock);
+}
+
+void site_block_fw_clear(void) {
+    if (!sb_inited || !sb_fw_ready) return;
+    platform_mutex_lock(&sb_fw_lock);
+    for (int i = sb_fw_count - 1; i >= 0; i--) sb_fw_del_at(i);
+    platform_mutex_unlock(&sb_fw_lock);
+}
+
+/* Kural olusturulur olusturulmaz cekirdek kurallarini KUR (onleyici):
+ *   1. Alan adini KENDIMIZ cozumleriz (getaddrinfo) -> kurbanin ilk
+ *      baglantisi dahi engellenir (onceden cozulmus/cached IP dahil).
+ *   2. DNS string DROP: kurbanin bundan sonraki sorgusu cekirdekte duser,
+ *      boylece gercek yanit hic uretilmez (yaris yok).
+ * Joker (* veya *) hedefler icin onleyici kurulum yapilmaz; gozlem yolu
+ * somut kurban gordukce kurallari zaten kurar. */
+void site_block_fw_prime(const char *owner_ip, const char *domain) {
+    if (!sb_inited) site_block_init();
+    if (!owner_ip || !owner_ip[0] || strcmp(owner_ip, "*") == 0) return;
+    if (!domain || !domain[0] || strcmp(domain, "*") == 0) return;
+
+    /* Wildcard basligini soy: "*.youtube.com" -> "youtube.com" */
+    const char *base = domain;
+    if (domain[0] == '*' && domain[1] == '.') base = domain + 2;
+    if (!base[0]) return;
+
+    /* 1) Alan adini kendimiz cozumle (DNS kuralindan ONCE: kendi sorgumuz
+     *    engellenmesin) ve IP DROP kurallarini kur. */
+    struct addrinfo hints, *res = NULL;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family   = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    if (getaddrinfo(base, NULL, &hints, &res) == 0) {
+        for (struct addrinfo *p = res; p; p = p->ai_next) {
+            char ipbuf[INET_ADDRSTRLEN];
+            struct sockaddr_in *sin = (struct sockaddr_in *)p->ai_addr;
+            if (sin && inet_ntop(AF_INET, &sin->sin_addr, ipbuf, sizeof(ipbuf)))
+                site_block_fw_block_ip(owner_ip, ipbuf, owner_ip, domain);
+        }
+        freeaddrinfo(res);
+    }
+
+    /* 2) DNS string DROP (udp/tcp 53) */
+    site_block_fw_block_dns(owner_ip, base, owner_ip, domain);
+}
+
+int site_block_fw_active(void) { return sb_fw_ready ? 1 : 0; }
 
 /* ==================================================================
  *   Gozle + uygula
@@ -575,13 +1058,31 @@ void site_block_observe(const PacketRecord *pkt) {
 
     if (!sb_enabled || !matched) return;
 
-    /* Ham enjeksiyon gerekli */
-    if (!sb_ri.ok && !sb_test_sink) {
+    /* Kurban bu makinenin kendi IP'si mi? Oyleyse Ethernet yerine yerel
+     * (AF_INET/IP_HDRINCL) teslim kullanilir. */
+    int local = sb_is_own_ip(victim);
+
+    /* --- Cekirdek (iptables) deterministik katman ---
+     * Enjeksiyondan BAGIMSIZ calisir: ham soket hazir olmasa bile kural
+     * kurulur, boylece yaris ortadan kalkar. */
+    {
+        const char *dstip = pkt->dst_ip;
+        if (pkt->domain_kind == DOMAIN_KIND_DNS) {
+            if (is_udp)
+                site_block_fw_block_dns(victim, pkt->app_domain, rule.ip, rule.domain);
+        } else if (dstip && dstip[0] && strcmp(dstip, victim) != 0) {
+            site_block_fw_block_ip(victim, dstip, rule.ip, rule.domain);
+        }
+    }
+
+    /* Ham enjeksiyon gerekli. Yerel (kendi IP) modda AF_PACKET olmasa bile
+     * AF_INET ham soketi yeterlidir -> inited kontrolu de kabul edilir. */
+    if (!sb_ri.ok && !sb_ri.inited && !sb_test_sink) {
         platform_mutex_lock(&sb_lock);
         sb_ensure_raw();
         platform_mutex_unlock(&sb_lock);
     }
-    if (!sb_ri.ok && !sb_test_sink) return;
+    if (!sb_ri.ok && !sb_ri.inited && !sb_test_sink) return;
 
     int mode = rule.mode;
     int did = 0;
@@ -589,21 +1090,21 @@ void site_block_observe(const PacketRecord *pkt) {
     switch (pkt->domain_kind) {
     case DOMAIN_KIND_DNS:
         if ((mode & SB_MODE_SINKHOLE) && is_udp) {
-            if (sb_enforce_dns_sinkhole(pkt) == 0) did = 1;
+            if (sb_enforce_dns_sinkhole(pkt, local) == 0) did = 1;
         } else if ((mode & SB_MODE_RST) && is_tcp) {
-            if (sb_enforce_rst(pkt) == 0) did = 1;
+            if (sb_enforce_rst(pkt, local) == 0) did = 1;
         }
         break;
     case DOMAIN_KIND_SNI:
     case DOMAIN_KIND_HTTP:
         if ((mode & SB_MODE_RST) && is_tcp) {
-            if (sb_enforce_rst(pkt) == 0) did = 1;
+            if (sb_enforce_rst(pkt, local) == 0) did = 1;
         }
         break;
     case DOMAIN_KIND_QUIC:
         /* RST ve BOTH modlari ICMP unreachable uretir; SINKHOLE tek basina uretmez */
         if (mode & SB_MODE_RST) {
-            if (sb_enforce_quic_icmp(pkt) == 0) did = 1;
+            if (sb_enforce_quic_icmp(pkt, local) == 0) did = 1;
         }
         break;
     default:

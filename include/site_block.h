@@ -25,7 +25,7 @@
 #define SB_MAX_RULES 256
 #define SB_DOMAIN_LEN MAX_DOMAIN_LEN
 #define SB_IP_LEN     MAX_IP_LEN
-#define SB_OBS_MAX    512
+#define SB_OBS_MAX    2048
 
 /* Uygulama modu (kural bazli) */
 enum {
@@ -62,6 +62,11 @@ typedef struct {
     unsigned long icmp_sent;   /* gonderilen ICMP unreachable */
     unsigned long observed;    /* islenen alan adi gozlemi */
     unsigned long sent_total;  /* toplam enjekte edilen kare */
+    /* --- Cekirdek (iptables) deterministik katman --- */
+    int    fw_ready;           /* BEAT_SB zinciri + atlamalar aktif mi */
+    unsigned long fw_ip_rules; /* aktif IP DROP kurali sayisi */
+    unsigned long fw_dns_rules;/* aktif DNS string DROP kurali sayisi */
+    unsigned long fw_events;   /* kac kez cekirdek kurali kuruldu */
 } SiteBlockStats;
 
 /* ---- Yasam dongusu ---- */
@@ -107,9 +112,30 @@ int  site_block_observations(SiteBlockObs *out, int max);
 void site_block_clear_observations(void);
 /* Bir gozlemi (IP+alan adi) dogrudan kurala cevir; mod default BOTH. */
 int  site_block_block_observed(const char *ip, const char *domain, int mode);
+/* Bir gozlemin engelini kaldir: (ip, domain) ile ESLEMEN tum kurallari
+ * (wildcard dahil) siler, cekirdek girdilerini temizler, gozlem bayraklarini
+ * tazeler. Kaldirilan kural sayisini dondurur. */
+int  site_block_unblock_observed(const char *ip, const char *domain);
 
 /* ---- Istatistik ---- */
 void site_block_get_stats(SiteBlockStats *s);
+
+/* ---- Cekirdek (iptables) deterministik karartma katmani ----------------
+ * Reaktif enjeksiyonun forward ile yarisa girmesini (race) ortadan
+ * kaldirmak icin, eslesen (kurban, hedef) icin cekirdek seviyesinde DROP
+ * kurallari kurulur. Boylece gercek DNS yaniti / TLS akisi asla gecmez.
+ */
+int  site_block_fw_init(void);           /* BEAT_SB zinciri + atlamalar */
+void site_block_fw_cleanup(void);        /* atlamalari ve zinciri kaldir */
+int  site_block_fw_block_ip(const char *victim, const char *ip,
+                            const char *owner_ip, const char *owner_domain);
+int  site_block_fw_block_dns(const char *victim, const char *domain,
+                             const char *owner_ip, const char *owner_domain);
+/* Kural eklendigi anda: alan adini kendimiz cozumle + IP/DNS DROP kur. */
+void site_block_fw_prime(const char *owner_ip, const char *domain);
+void site_block_fw_unblock_domain(const char *owner_ip, const char *owner_domain);
+void site_block_fw_clear(void);
+int  site_block_fw_active(void);
 
 /* ---- Test kancasi: gercek ag yerine sink'e yonlendir ---- */
 #include "raw_inject.h"

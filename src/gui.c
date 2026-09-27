@@ -2549,9 +2549,13 @@ static void draw_panel_tools(int W, int H) {
                                 orow_h - 6},
                     o->blocked ? "Ac" : "Blok")) {
         if (o->blocked) {
-          int idx = site_block_find_rule(o->ip, o->domain);
-          if (idx >= 0)
-            site_block_remove_rule(idx);
+          /* Tum eslesen kurallari kaldir (wildcard dahil) + gozlem
+           * bayraklarini tazele: satir aninda normale doner. */
+          int n = site_block_unblock_observed(o->ip, o->domain);
+          if (n > 0) {
+            snprintf(buf, sizeof(buf), "%d kural kaldirildi.", n);
+            mon_notice_set(buf);
+          }
         } else {
           site_block_block_observed(o->ip, o->domain, g_sb_mode);
           mon_notice_set("Gozlemden kural eklendi.");
@@ -3028,7 +3032,7 @@ void gui_init(int width, int height) {
 
   /* Pencere: boyutlandirilabilir + MSAA */
   SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT);
-  InitWindow(1280, 720, "CySec");
+  InitWindow(1280, 720, "BEAT System");
 
   /* FLAG_WINDOW_MAXIMIZED bayragi raylib'de güvenilir çalışmıyor;
    * MaximizeWindow() ile açıkça maximize ediyoruz. */
@@ -3066,8 +3070,34 @@ void gui_init(int width, int height) {
               ColorToInt(ui_alpha(COLOR_ACCENT, 220)));
   GuiSetStyle(TEXTBOX, BORDER_WIDTH, 1);
 
-  /* TTF Font yukle ve yapilandir */
-  g_custom_font = LoadFontEx("../assets/fonts/Roboto-Regular.ttf", 64, 0, 250);
+  /* TTF Font yukle ve yapilandir.
+   * Yol calisma dizinine degil, calistirilabilir dosyanin konumuna gore
+   * cozulur: boylece uygulama herhangi bir dizinden baslatilsa da
+   * (ornek: proje kokunden ./build/beat_system) ayni gorunumu verir. */
+  {
+    const char *app_dir = GetApplicationDirectory();
+    const char *candidates[] = {
+      TextFormat("%s../assets/fonts/Roboto-Regular.ttf", app_dir),
+      TextFormat("%sassets/fonts/Roboto-Regular.ttf", app_dir),
+      "assets/fonts/Roboto-Regular.ttf",    /* CWD = proje koku */
+      "../assets/fonts/Roboto-Regular.ttf", /* CWD = build/ (eski davranis) */
+    };
+    const char *font_path = 0;
+    for (int i = 0; i < (int)(sizeof(candidates) / sizeof(candidates[0]));
+         i++) {
+      if (FileExists(candidates[i])) {
+        font_path = candidates[i];
+        break;
+      }
+    }
+    if (font_path) {
+      g_custom_font = LoadFontEx(font_path, 64, 0, 250);
+      TraceLog(LOG_INFO, "FONT: %s yuklendi", font_path);
+    } else {
+      TraceLog(LOG_WARNING,
+               "FONT: Roboto-Regular.ttf bulunamadi, varsayilan fonta dusuluyor");
+    }
+  }
   if (g_custom_font.texture.id > 0) {
     SetTextureFilter(g_custom_font.texture, TEXTURE_FILTER_BILINEAR);
     GuiSetFont(g_custom_font);

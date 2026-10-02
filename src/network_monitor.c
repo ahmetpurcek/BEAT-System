@@ -1916,8 +1916,8 @@ static void *monitor_thread(void *arg) {
                 }
             }
 
-            /* Windows: dongusal (loopback) aygitlari atla; aciklamada varsayilan
-             * adaptorun FriendlyName'i gecen aygita, sonra ilk fiziksel aygita oncelik ver. */
+            /* dongusal (loopback) aygitlari atla; aciklamada varsayilan
+             * arayuz adini gecen aygita, sonra ilk fiziksel aygita oncelik ver. */
             char friendly[MAX_IFACE_LEN] = {0};
             platform_get_default_interface(friendly, sizeof(friendly));
 

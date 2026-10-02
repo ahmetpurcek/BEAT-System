@@ -1,6 +1,6 @@
 /*
  * raw_inject.c — Keyfi Ethernet/IPv4/UDP/TCP kare enjeksiyonu.
- * Linux: AF_PACKET SOCK_RAW. Digerleri: libpcap pcap_inject.
+ * Linux: AF_PACKET SOCK_RAW.
  */
 #include "raw_inject.h"
 
@@ -13,16 +13,12 @@
 #include <netinet/in.h>
 #include <netinet/ip.h>
 
-#include <pcap.h>
-
-#if defined(__linux__)
 #include <unistd.h>
 #include <errno.h>
 #include <sys/ioctl.h>
 #include <net/if.h>
 #include <net/ethernet.h>
 #include <netpacket/packet.h>
-#endif
 
 /* ==================================================================
  *   Checksum yardimcilari
@@ -197,8 +193,6 @@ void raw_inject_set_sink(RawInject *ri, RawInjectSink fn, void *sink_ud) {
  *   Soket yonetimi
  * ================================================================== */
 
-#if defined(__linux__)
-
 int raw_inject_init(RawInject *ri, const char *iface) {
     if (!ri) return -1;
     memset(ri, 0, sizeof(*ri));
@@ -310,46 +304,3 @@ int raw_inject_send(RawInject *ri, const unsigned char *frame, int len) {
     return (r == (ssize_t)len) ? 0 : -1;
 }
 
-#else /* !__linux__ : libpcap tabanli fallback */
-
-int raw_inject_init(RawInject *ri, const char *iface) {
-    if (!ri) return -1;
-    memset(ri, 0, sizeof(*ri));
-    ri->fd = -1;
-    ri->fd_inet = -1;
-    if (!iface || !iface[0]) return -1;
-    strncpy(ri->iface, iface, RI_IFACE_LEN - 1);
-    char errbuf[PCAP_ERRBUF_SIZE] = {0};
-    pcap_t *h = pcap_open_live(iface, 65536, 0, 10, errbuf);
-    if (!h) return -1;
-    ri->pcap = h;
-    ri->ok = 1;
-    return 0;
-}
-
-void raw_inject_close(RawInject *ri) {
-    if (!ri) return;
-    if (ri->pcap) {
-        pcap_close((pcap_t *)ri->pcap);
-        ri->pcap = NULL;
-    }
-    ri->ok = 0;
-}
-
-int raw_inject_send(RawInject *ri, const unsigned char *frame, int len) {
-    if (!ri || !frame || len <= 0) return -1;
-    if (ri->sink) return ri->sink(ri->sink_ud, frame, len);   /* yalitilmis test */
-    if (!ri->ok || !ri->pcap) return -1;
-    return (pcap_inject((pcap_t *)ri->pcap, frame, (size_t)len) == len) ? 0 : -1;
-}
-
-/* Linux disi platformlarda yerel loopback enjeksiyonu desteklenmez. */
-int raw_inject_send_ip(RawInject *ri, const char *src_ip, const char *dst_ip,
-                       unsigned char proto,
-                       const unsigned char *payload, int payload_len) {
-    (void)ri; (void)src_ip; (void)dst_ip; (void)proto;
-    (void)payload; (void)payload_len;
-    return -1;
-}
-
-#endif

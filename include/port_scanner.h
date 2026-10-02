@@ -1,5 +1,5 @@
 /*
- * port_scanner.h — Stealth Advanced Port Scanner (Cross-Platform)
+ * port_scanner.h — Stealth Advanced Port Scanner
  * IDS/IPS Evasion, Akıllı Gürültü Yönetimi, Servis / Zafiyet Tespiti
  */
 #ifndef PORT_SCANNER_H

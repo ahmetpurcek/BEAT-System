@@ -2,8 +2,7 @@
  * raw_inject.h — Keyfi Ethernet/IPv4/UDP/TCP kare enjeksiyonu.
  *
  * Site karartma motoru (site_block.c) DNS sinkhole yanitini ve TCP RST
- * paketlerini bu arayuz uzerinden aga birakir. Linux'ta AF_PACKET ham
- * soketi, diger platformlarda libpcap pcap_inject kullanilir.
+ * paketlerini bu arayuz uzerinden aga birakir. AF_PACKET ham soketi kullanilir.
  *
  * Checksum'lar (IPv4 basligi + TCP/UDP pseudo-header) otomatik hesaplanir.
  */
@@ -26,7 +25,6 @@ typedef struct {
     int           ifindex;
     char          iface[RI_IFACE_LEN];
     unsigned char own_mac[6];         /* kendi arayuz MAC'imiz */
-    void         *pcap;               /* libpcap fallback tutamaci */
     RawInjectSink sink;               /* NULL = gercek gonderim */
     void         *sink_ud;
 } RawInject;

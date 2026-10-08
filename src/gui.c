@@ -19,6 +19,7 @@
 #include "site_block.h"
 #include "raylib.h"
 #include "utils.h"
+#include "gui_camera.h"
 
 #define RAYGUI_IMPLEMENTATION
 #include "../lib/raygui.h"
@@ -254,6 +255,14 @@ static void DrawTextC(const char *text, int x, int y, int size, Color color) {
   }
 }
 
+static int ui_text_w(const char *text, int size) {
+  if (g_custom_font.texture.id > 0) {
+    Vector2 m = MeasureTextEx(g_custom_font, text, (float)size, 1.0f);
+    return (int)m.x;
+  }
+  return MeasureText(text, size);
+}
+
 static void DrawRoundedPanel(Rectangle r, Color bg, Color border) {
   DrawRectangleRounded(r, 0.035f, 8, bg);
   DrawRectangleRoundedLinesEx(r, 0.035f, 8, 1.0f, border);
@@ -304,6 +313,15 @@ static void draw_dot_label(int x, int y, Color dot, const char *label,
                            int size, Color text) {
   DrawCircle(x + 3, y + size / 2, 3, dot);
   DrawTextC(label, x + 12, y, size, text);
+}
+
+/* IDS backend ASCII onem belirteci -> ekranda Turkce gosterim */
+static const char *sev_tr(const char *sev) {
+  if (!sev) return "";
+  if (strcmp(sev, "KRITIK") == 0) return "KRİTİK";
+  if (strcmp(sev, "YUKSEK") == 0) return "YÜKSEK";
+  if (strcmp(sev, "DUSUK") == 0)  return "DÜŞÜK";
+  return sev; /* ORTA zaten dogru */
 }
 
 /* Secilen onem derecesi -> renk (IDS alarmlari) */
@@ -422,13 +440,13 @@ static void draw_header(int W) {
   /* Izleme durumu + baslat/durdur butonu (Alarm Merkezi'nden tasindi) */
   int monitoring = (g_capture_all || g_capture_active_ip[0]);
   Color stc = (g_ids.running && monitoring) ? COLOR_GREEN : COLOR_TEXT_DIM;
-  const char *stt = (g_ids.running && monitoring) ? "AKTIF IZLEME" : "PASIF";
+  const char *stt = (g_ids.running && monitoring) ? "AKTİF İZLEME" : "PASIF";
   Rectangle mon_btn = {(float)(W - cw - 40 - 100), 12.0f, 100.0f, 24.0f};
   int stw = MeasureText(stt, 8);
   int stx = (int)mon_btn.x - 8 - stw; /* durum yazisinin sol kenari */
   draw_led((float)(stx - 11), 24.0f, 3.5f, stc, monitoring);
   DrawTextC(stt, stx, 19, 8, stc);
-  if (GuiButton(mon_btn, monitoring ? "DURDUR" : "AGI IZLE")) {
+  if (GuiButton(mon_btn, monitoring ? "DURDUR" : "AĞI İZLE")) {
     if (monitoring)
       capture_stop_all();
     else
@@ -467,7 +485,7 @@ static void draw_tabs(int W) {
   DrawRectangle(0, y, W, 32, (Color){7, 9, 15, 255});
   DrawRectangle(0, y + 31, W, 1, ui_alpha(COLOR_BORDER, 120));
 
-  const char *labels[] = {"Kontrol Paneli", "Alarm Merkezi", "Araclar"};
+  const char *labels[] = {"Kontrol Paneli", "Alarm Merkezi", "Araçlar"};
   int tx = 12;
   for (int i = 0; i < (int)TAB_COUNT; i++) {
     int tw = MeasureText(labels[i], 13) + 30;
@@ -540,9 +558,9 @@ static const char *mon_list_mac_of(const char *ip) {
 static void draw_mon_list_panel(int rx, int ry, int rw, int rh) {
   DrawRoundedPanel((Rectangle){rx, ry, rw, rh}, COLOR_PANEL,
                    ui_alpha(COLOR_BORDER, 140));
-  draw_panel_title(rx + 10, ry + 10, "IZLEME LISTESI", 12, COLOR_GREEN);
-  DrawTextC(mon_list_active() ? "Paket izleme bu IP'lerle sinirli"
-                              : "Bos: izleme kapali - cihaz ekleyin",
+  draw_panel_title(rx + 10, ry + 10, "İZLEME LİSTESİ", 12, COLOR_GREEN);
+  DrawTextC(mon_list_active() ? "Paket izleme bu IP'lerle sınırlı"
+                              : "Boş: izleme kapalı - cihaz ekleyin",
             rx + 10, ry + 24, 8, COLOR_TEXT_DIM);
   /* Tum cihazlari listeye ekle / listeyi bosalt */
   int abw = (rw - 20 - 6) / 2;
@@ -551,7 +569,7 @@ static void draw_mon_list_panel(int rx, int ry, int rw, int rh) {
   int mah = CheckCollisionPointRec(GetMousePosition(), mab);
   DrawRectangleRounded(mab, 0.3f, 6, ui_alpha(COLOR_ACCENT, mah ? 100 : 55));
   DrawRectangleRoundedLinesEx(mab, 0.3f, 6, 1.0f, ui_alpha(COLOR_ACCENT, 190));
-  DrawTextC("TUMUNU EKLE", mab.x + (abw - MeasureText("TUMUNU EKLE", 9)) / 2,
+  DrawTextC("TÜMÜNÜ EKLE", mab.x + (abw - MeasureText("TÜMÜNÜ EKLE", 9)) / 2,
             ry + 41, 9, COLOR_TEXT);
   if (mah && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
     for (int i = 0; i < g_scan.device_count; i++) {
@@ -564,7 +582,7 @@ static void draw_mon_list_panel(int rx, int ry, int rw, int rh) {
   Color mcc = (g_mon_count > 0) ? COLOR_RED : COLOR_TEXT_DIM;
   DrawRectangleRounded(mcb, 0.3f, 6, ui_alpha(mcc, mch ? 70 : 16));
   DrawRectangleRoundedLinesEx(mcb, 0.3f, 6, 1.0f, ui_alpha(mcc, mch ? 220 : 50));
-  DrawTextC("BOSALT", mcb.x + (abw - MeasureText("BOSALT", 9)) / 2, ry + 41, 9,
+  DrawTextC("BOŞALT", mcb.x + (abw - MeasureText("BOŞALT", 9)) / 2, ry + 41, 9,
             g_mon_count > 0 ? COLOR_TEXT : ui_alpha(COLOR_TEXT_DIM, 150));
   if (mch && g_mon_count > 0 && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
     g_mon_count = 0;
@@ -590,11 +608,11 @@ static void draw_mon_list_panel(int rx, int ry, int rw, int rh) {
   }
 
   if (g_mon_count == 0) {
-    DrawTextC("Liste bos. 'TUMUNU EKLE' ile hepsini ekleyin.", rx + 10,
+    DrawTextC("Liste boş. 'TÜMÜNÜ EKLE' ile hepsini ekleyin.", rx + 10,
               list_top + 8, 9, COLOR_TEXT_DIM);
-    DrawTextC("Bos liste = izleme kapali (otomatik izleme yok).", rx + 10,
+    DrawTextC("Boş liste = izleme kapalı (otomatik izleme yok).", rx + 10,
               list_top + 26, 8, ui_alpha(COLOR_TEXT_DIM, 150));
-    DrawTextC("Izleme yalnizca listedeki IP'lere uygulanir.",
+    DrawTextC("İzleme yalnızca listedeki IP'lere uygulanır.",
               rx + 10, ry + rh - 14, 7, ui_alpha(COLOR_TEXT_DIM, 160));
     return;
   }
@@ -642,7 +660,7 @@ static void draw_mon_list_panel(int rx, int ry, int rw, int rh) {
   draw_custom_scrollbar(area.x + area.width - 6, list_top, 8, list_h,
                         g_mon_count * item_h, &g_scroll_mon_list);
 
-  DrawTextC("Izleme yalnizca listedeki IP'lere uygulanir.",
+  DrawTextC("İzleme yalnızca listedeki IP'lere uygulanır.",
             rx + 10, ry + rh - 14, 7, ui_alpha(COLOR_TEXT_DIM, 160));
 }
 
@@ -653,23 +671,23 @@ static void draw_panel_dashboard(int W, int H) {
   /* Ust istatistik karti: Cihaz / Gateway / Bu Cihaz */
   int cw = (W - 32) / 3;
   snprintf(buf, sizeof(buf), "%d", g_scan.total);
-  snprintf(sub, sizeof(sub), "Ag: %s",
+  snprintf(sub, sizeof(sub), "Ağ: %s",
            g_scan.network_range[0] ? g_scan.network_range : "...");
-  draw_stat_card((Rectangle){12, y0, cw, 62}, "CIHAZ", buf, COLOR_ACCENT,
+  draw_stat_card((Rectangle){12, y0, cw, 62}, "CİHAZ", buf, COLOR_ACCENT,
                  sub);
 
   snprintf(buf, sizeof(buf), "%s",
            g_scan.gateway_ip[0] ? g_scan.gateway_ip : "...");
   snprintf(sub, sizeof(sub), "MAC: %s",
            g_scan.gateway_mac[0] ? g_scan.gateway_mac : "-");
-  draw_stat_card((Rectangle){12 + cw + 4, y0, cw, 62}, "AG GECIDI", buf,
+  draw_stat_card((Rectangle){12 + cw + 4, y0, cw, 62}, "AĞ GEÇİDİ", buf,
                  COLOR_GREEN, sub);
 
   snprintf(buf, sizeof(buf), "%s",
            g_scan.local_ip[0] ? g_scan.local_ip : "...");
   snprintf(sub, sizeof(sub), "%s",
-           g_scan.local_iface[0] ? g_scan.local_iface : "arayuz yok");
-  draw_stat_card((Rectangle){12 + (cw + 4) * 2, y0, cw, 62}, "BU CIHAZ", buf,
+           g_scan.local_iface[0] ? g_scan.local_iface : "arayüz yok");
+  draw_stat_card((Rectangle){12 + (cw + 4) * 2, y0, cw, 62}, "BU CİHAZ", buf,
                  COLOR_CYAN, sub);
 
   /* Sol: Cihaz listesi | Sag: Detay veya Log */
@@ -681,7 +699,7 @@ static void draw_panel_dashboard(int W, int H) {
   /* Sol panel */
   DrawRoundedPanel((Rectangle){12, list_y, list_w, list_h}, COLOR_PANEL,
                    ui_alpha(COLOR_BORDER, 140));
-  draw_panel_title(24, list_y + 10, "AGDAKI CIHAZLAR", 12, COLOR_ACCENT);
+  draw_panel_title(24, list_y + 10, "AĞDAKİ CİHAZLAR", 12, COLOR_ACCENT);
   DrawTextC("Yenileme: otonom", 24, list_y + 24, 8, COLOR_TEXT_DIM);
 
   /* Tarama badge */
@@ -742,7 +760,7 @@ static void draw_panel_dashboard(int W, int H) {
     int is_blk = arp_block_is_blocked(d->ip);
     Color tagc = is_gw ? COLOR_AMBER : (is_local ? COLOR_GREEN : COLOR_TEXT_DIM);
     const char *tag =
-        is_gw ? "AG GECIDI" : (is_local ? "BU CIHAZ" : "CIHAZ");
+        is_gw ? "AĞ GEÇİDİ" : (is_local ? "BU CİHAZ" : "CİHAZ");
 
     /* Zemin: secili / hover / engelli (kirmizi ton) */
     Color bg = is_sel ? COLOR_SELECTED
@@ -772,7 +790,7 @@ static void draw_panel_dashboard(int W, int H) {
     Color mcol = mon_act ? COLOR_GREEN : COLOR_ACCENT;
     DrawRectangleRounded(mbtn, 0.3f, 6, ui_alpha(mcol, mhov ? 100 : 55));
     DrawRectangleRoundedLinesEx(mbtn, 0.3f, 6, 1.0f, ui_alpha(mcol, 190));
-    DrawTextC("IZLE", mbtn.x + (34 - MeasureText("IZLE", 8)) / 2, iy + 15, 8,
+    DrawTextC("İZLE", mbtn.x + (34 - ui_text_w("İZLE", 8)) / 2, iy + 15, 8,
               mon_act ? COLOR_TEXT : ui_mix(mcol, COLOR_TEXT, 0.55f));
     if (mhov && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
       mon_list_toggle(d->ip);
@@ -792,8 +810,8 @@ static void draw_panel_dashboard(int W, int H) {
       Color bcol = is_blk ? COLOR_GREEN : COLOR_RED;
       DrawRectangleRounded(tbtn, 0.3f, 6, ui_alpha(bcol, bhov ? 100 : 55));
       DrawRectangleRoundedLinesEx(tbtn, 0.3f, 6, 1.0f, ui_alpha(bcol, 190));
-      DrawTextC(is_blk ? "AC" : "KES",
-                tbtn.x + (36 - MeasureText(is_blk ? "AC" : "KES", 8)) / 2,
+      DrawTextC(is_blk ? "AÇ" : "KES",
+                tbtn.x + (36 - MeasureText(is_blk ? "AÇ" : "KES", 8)) / 2,
                 iy + 15, 8, COLOR_TEXT);
       if (bhov && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
         /* KES/AC — satir secimini tetikleme */
@@ -804,8 +822,8 @@ static void draw_panel_dashboard(int W, int H) {
     } else {
       /* Ag gecidi / bu cihaz engellenemez: pasif buton */
       DrawRectangleRounded(tbtn, 0.3f, 6, (Color){255, 255, 255, 10});
-      DrawTextC(is_blk ? "AC" : "KES",
-                tbtn.x + (36 - MeasureText(is_blk ? "AC" : "KES", 8)) / 2,
+      DrawTextC(is_blk ? "AÇ" : "KES",
+                tbtn.x + (36 - MeasureText(is_blk ? "AÇ" : "KES", 8)) / 2,
                 iy + 15, 8, ui_alpha(COLOR_TEXT_DIM, 120));
     }
 
@@ -849,8 +867,8 @@ static void draw_panel_dashboard(int W, int H) {
 
     if (blk_n == 0) {
       DrawTextC(blk_eng
-                    ? "Engel yok. Cihaz satirindaki 'KES' ile agdan kesin."
-                    : "ARP motoru kapali (root/cap_net_raw gerekli).",
+                    ? "Engel yok. Cihaz satırındaki 'KES' ile ağdan kesin."
+                    : "ARP motoru kapalı (root/cap_net_raw gerekli).",
                 blk_x + 10, blist_top, 8,
                 blk_eng ? COLOR_TEXT_DIM : ui_alpha(COLOR_RED, 170));
     } else {
@@ -888,7 +906,7 @@ static void draw_panel_dashboard(int W, int H) {
                              ui_alpha(COLOR_GREEN, rhov ? 100 : 50));
         DrawRectangleRoundedLinesEx(rbtn, 0.25f, 4, 1.0f,
                                     ui_alpha(COLOR_GREEN, 160));
-        DrawTextC("GERI AL", rbtn.x + (60 - MeasureText("GERI AL", 8)) / 2,
+        DrawTextC("GERİ AL", rbtn.x + (60 - MeasureText("GERİ AL", 8)) / 2,
                   by + 5, 8, COLOR_TEXT);
         if (rhov && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
           arp_block_set(be->ip, be->mac, 0);
@@ -908,7 +926,10 @@ static void draw_panel_dashboard(int W, int H) {
   int ry = list_y;
   int rh = list_h;
 
-  draw_mon_list_panel(rx, ry, mon_w, rh);
+  /* Sağ kolonu dikey böl: üstte İzleme Listesi, altta Kamera Listesi. */
+  int mon_h = rh / 2 - 4;
+  draw_mon_list_panel(rx, ry, mon_w, mon_h);
+  gui_camera_draw_list_panel(rx, ry + mon_h + 8, mon_w, rh - mon_h - 8);
   int lrx = rx + mon_w + 8;
   if (g_selected_device_ip[0]) {
     draw_right_panel_device(lrx, ry, W - lrx - 12, rh);
@@ -939,7 +960,7 @@ static void capture_start_all(void) {
   /* BOS liste = izleme kapsami yok: tum agi izlemeye CALISMA. Kullanici
    * once 'TUMUNU EKLE' / IZLE ile cihazlari listeye almalidir. */
   if (g_mon_count == 0) {
-    mon_notice_set("Izleme listesi bos: once cihaz ekleyin (TUMUNU EKLE)");
+    mon_notice_set("İzleme listesi boş: önce cihaz ekleyin (TÜMÜNÜ EKLE)");
     return;
   }
   capture_stop_all();
@@ -1038,7 +1059,7 @@ static void draw_right_panel_device(int rx, int ry, int rw, int rh) {
 
   /* Baslik */
   char tbuf[128];
-  snprintf(tbuf, sizeof(tbuf), "CIHAZ DETAYI");
+  snprintf(tbuf, sizeof(tbuf), "CİHAZ DETAYI");
   draw_panel_title(rx + 12, ry + 10, tbuf, 12, COLOR_CYAN);
   DrawTextC(g_selected_device_ip, rx + 110, ry + 11, 10, COLOR_TEXT_SEC);
 
@@ -1075,15 +1096,15 @@ static void draw_right_panel_device(int rx, int ry, int rw, int rh) {
     int is_gw = (strcmp(dev->ip, g_scan.gateway_ip) == 0);
     int is_local = (strcmp(dev->ip, g_scan.local_ip) == 0);
     Color rolec = is_gw ? COLOR_AMBER : (is_local ? COLOR_GREEN : COLOR_TEXT_SEC);
-    const char *role = is_gw ? "AG GECIDI (ROUTER)"
-                       : (is_local ? "BU CIHAZ (YEREL)" : "AG ISTEMCISI");
+    const char *role = is_gw ? "AĞ GEÇİDİ (ROUTER)"
+                       : (is_local ? "BU CİHAZ (YEREL)" : "AĞ İSTEMCİSİ");
     DrawTextC(role, rx + 58, cy + 10, 10, rolec);
     DrawTextC(dev->ip, rx + 58, cy + 26, 17, COLOR_TEXT);
     DrawTextC(dev->mac, rx + 58, cy + 46, 9, COLOR_TEXT_DIM);
     cy += 76;
 
     /* Ozellikler tablosu */
-    DrawTextC("OZELLIKLER", rx + 16, cy, 9, COLOR_TEXT_DIM);
+    DrawTextC("ÖZELLİKLER", rx + 16, cy, 9, COLOR_TEXT_DIM);
     cy += 18;
 
     typedef struct { const char *label; const char *value; Color c; } DvRow;
@@ -1095,7 +1116,7 @@ static void draw_right_panel_device(int rx, int ry, int rw, int rh) {
     if (dev->hostname[0])
       rows[rc++] = (DvRow){"Hostname", dev->hostname, COLOR_TEXT};
     if (dev->vendor[0])
-      rows[rc++] = (DvRow){"Uretici", dev->vendor, COLOR_CYAN};
+      rows[rc++] = (DvRow){"Üretici", dev->vendor, COLOR_CYAN};
 
     char last_seen[64] = "-";
     if (dev->last_seen > 0) {
@@ -1105,7 +1126,7 @@ static void draw_right_panel_device(int rx, int ry, int rw, int rh) {
       strftime(last_seen, sizeof(last_seen), "%H:%M:%S", &tmv);
     }
     char tmpbuf[160];
-    snprintf(tmpbuf, sizeof(tmpbuf), "Son gorulme: %s", last_seen);
+    snprintf(tmpbuf, sizeof(tmpbuf), "Son görülme: %s", last_seen);
     rows[rc++] = (DvRow){"Durum", tmpbuf, COLOR_GREEN};
 
     for (int i = 0; i < rc; i++) {
@@ -1130,13 +1151,13 @@ static void draw_right_panel_device(int rx, int ry, int rw, int rh) {
     /* Guvenlik bayraklari */
     DrawRectangle(rx + 10, cy, rw - 20, 1, ui_alpha(COLOR_BORDER, 120));
     cy += 12;
-    DrawTextC("GUVENLIK BAYRAKLARI", rx + 16, cy, 9, COLOR_TEXT_DIM);
+    DrawTextC("GÜVENLİK BAYRAKLARI", rx + 16, cy, 9, COLOR_TEXT_DIM);
     cy += 20;
 
     int fx = rx + 16;
     if (is_gw) {
-      draw_badge(fx, cy, "Ag gecidi", 8, COLOR_AMBER);
-      fx += MeasureText("Ag gecidi", 8) + 26;
+      draw_badge(fx, cy, "Ağ geçidi", 8, COLOR_AMBER);
+      fx += MeasureText("Ağ geçidi", 8) + 26;
     }
     if (is_local) {
       draw_badge(fx, cy, "Yerel cihaz", 8, COLOR_GREEN);
@@ -1147,11 +1168,11 @@ static void draw_right_panel_device(int rx, int ry, int rw, int rh) {
     /* --- Izleme Listesi (paket izleme kapsami) --- */
     DrawRectangle(rx + 10, cy, rw - 20, 1, ui_alpha(COLOR_BORDER, 120));
     cy += 12;
-    DrawTextC("IZLEME LISTESI", rx + 16, cy, 9, COLOR_TEXT_DIM);
+    DrawTextC("İZLEME LİSTESİ", rx + 16, cy, 9, COLOR_TEXT_DIM);
     cy += 20;
     int mon_in = mon_list_has(dev->ip);
     Rectangle monb = {rx + 16, cy, 200, 26};
-    const char *mlab = mon_in ? "Listeden Cikar" : "Izleme Listesine Ekle";
+    const char *mlab = mon_in ? "Listeden Çıkar" : "İzleme Listesine Ekle";
     int mnhov = CheckCollisionPointRec(GetMousePosition(), monb);
     Color mncol = mon_in ? COLOR_RED : COLOR_GREEN;
     DrawRectangleRounded(monb, 0.3f, 6, ui_alpha(mncol, mnhov ? 100 : 55));
@@ -1161,8 +1182,8 @@ static void draw_right_panel_device(int rx, int ry, int rw, int rh) {
     if (mnhov && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
       mon_list_toggle(dev->ip);
     }
-    DrawTextC(mon_in ? "Paket izleme, ARP spoof ve IDS uyarilari bu cihaz icin ACIK."
-                     : "Listede degil: bu cihaz icin paket izleme/uyari gosterilmez.",
+    DrawTextC(mon_in ? "Paket izleme, ARP spoof ve IDS uyarıları bu cihaz için AÇIK."
+                     : "Listede değil: bu cihaz için paket izleme/uyarı gösterilmez.",
               rx + 16, cy + 31, 8, COLOR_TEXT_DIM);
 
     cy += 47;
@@ -1170,13 +1191,13 @@ static void draw_right_panel_device(int rx, int ry, int rw, int rh) {
     /* --- Agdan Kes (ARP black-hole) --- */
     DrawRectangle(rx + 10, cy, rw - 20, 1, ui_alpha(COLOR_BORDER, 120));
     cy += 12;
-    DrawTextC("AGDAN KESME", rx + 16, cy, 9, COLOR_TEXT_DIM);
+    DrawTextC("AĞDAN KESME", rx + 16, cy, 9, COLOR_TEXT_DIM);
     cy += 20;
 
     int blk_act = arp_block_is_blocked(dev->ip);
     int blk_off = !g_arp_block.engine_ok || is_gw || is_local;
     Rectangle abtn = {rx + 16, cy, 200, 26};
-    const char *alab = blk_act ? "Agi Geri Ver" : "Agdan Kes";
+    const char *alab = blk_act ? "Ağı Geri Ver" : "Ağdan Kes";
     if (!blk_off) {
       int abhov = CheckCollisionPointRec(GetMousePosition(), abtn);
       Color abcol = blk_act ? COLOR_GREEN : COLOR_RED;
@@ -1197,16 +1218,16 @@ static void draw_right_panel_device(int rx, int ry, int rw, int rh) {
     }
     const char *ahint;
     if (is_gw || is_local)
-      ahint = "Ag gecidi ve bu cihaz engellenemez.";
+      ahint = "Ağ geçidi ve bu cihaz engellenemez.";
     else if (!g_arp_block.engine_ok)
-      ahint = "ARP motoru kapali (root/cap_net_raw gerekli).";
+      ahint = "ARP motoru kapalı (root/cap_net_raw gerekli).";
     else if (blk_act)
-      ahint = "Cihaz agdan kesildi. Geri vermek icin butona basin.";
+      ahint = "Cihaz ağdan kesildi. Geri vermek için butona basın.";
     else
-      ahint = "Cihazin ag erisimini aninda keser (ARP black-hole).";
+      ahint = "Cihazın ağ erişimini anında keser (ARP black-hole).";
     DrawTextC(ahint, rx + 16, cy + 31, 8, COLOR_TEXT_DIM);
   } else {
-    DrawTextC("Cihaz bilgisi bulunamadi.", rx + 16, cy, 11, COLOR_TEXT_DIM);
+    DrawTextC("Cihaz bilgisi bulunamadı.", rx + 16, cy, 11, COLOR_TEXT_DIM);
   }
 }
 
@@ -1230,19 +1251,19 @@ static void draw_panel_security(int W, int H) {
   /* Stat kartlari */
   int cw = (W - 40) / 4;
   struct { const char *label; int val; Color color; } cats[] = {
-    {"KRITIK", cnt_kritik, COLOR_RED},
-    {"YUKSEK", cnt_yuksek, COLOR_ORANGE},
+    {"KRİTİK", cnt_kritik, COLOR_RED},
+    {"YÜKSEK", cnt_yuksek, COLOR_ORANGE},
     {"ORTA",   cnt_orta,   COLOR_YELLOW},
-    {"DUSUK",  cnt_dusuk,  COLOR_GREEN},
+    {"DÜŞÜK",  cnt_dusuk,  COLOR_GREEN},
   };
   char nbuf[16];
   for (int i = 0; i < 4; i++) {
     snprintf(nbuf, sizeof(nbuf), "%d", cats[i].val);
     draw_stat_card((Rectangle){12 + i * (cw + 4), y0, cw, 62},
                    cats[i].label, nbuf, cats[i].color,
-                   i == 0 ? "Aninda mudahale gerekli"
-                          : (i == 1 ? "Oncelikli inceleme"
-                                    : (i == 2 ? "Izleme onerilir"
+                   i == 0 ? "Anında müdahale gerekli"
+                          : (i == 1 ? "Öncelikli inceleme"
+                                    : (i == 2 ? "İzleme önerilir"
                                               : "Bilgilendirme")));
   }
 
@@ -1258,9 +1279,9 @@ static void draw_panel_security(int W, int H) {
   snprintf(buf, sizeof(buf), "Paket: %lu",
            (unsigned long)g_ids.total_pkts_processed);
   DrawTextC(buf, 136, py + 13, 10, COLOR_TEXT_SEC);
-  snprintf(buf, sizeof(buf), "Akis: %d", g_ids.active_trackers);
+  snprintf(buf, sizeof(buf), "Akış: %d", g_ids.active_trackers);
   DrawTextC(buf, 236, py + 13, 10, COLOR_TEXT_SEC);
-  snprintf(buf, sizeof(buf), "Toplam Uyari: %lu",
+  snprintf(buf, sizeof(buf), "Toplam Uyarı: %lu",
            (unsigned long)g_ids.total_alerts);
   DrawTextC(buf, 336, py + 13, 10, COLOR_TEXT_SEC);
 
@@ -1274,16 +1295,16 @@ static void draw_panel_security(int W, int H) {
                    COLOR_PANEL, ui_alpha(COLOR_BORDER, 140));
 
   /* Panel basligi + onem derecesi legendi */
-  snprintf(buf, sizeof(buf), "TEHDIT ALARMLARI (%d)", g_ids_alert_view_count);
+  snprintf(buf, sizeof(buf), "TEHDİT ALARMLARI (%d)", g_ids_alert_view_count);
   draw_panel_title(24, py + 10, buf, 12, COLOR_RED);
 
   /* Legend (basligin saginda) */
   {
-    const char *sevs[] = {"KRITIK", "YUKSEK", "ORTA", "DUSUK"};
+    const char *sevs[] = {"KRİTİK", "YÜKSEK", "ORTA", "DÜŞÜK"};
     Color scs[] = {COLOR_RED, COLOR_ORANGE, COLOR_YELLOW,
                    COLOR_GREEN};
     char hbuf[80];
-    snprintf(hbuf, sizeof(hbuf), "TEHDIT ALARMLARI (%d)", g_ids_alert_view_count);
+    snprintf(hbuf, sizeof(hbuf), "TEHDİT ALARMLARI (%d)", g_ids_alert_view_count);
     int lxx = 24 + MeasureText(hbuf, 12) + 24;
     for (int li = 0; li < 4; li++) {
       int lw = MeasureText(sevs[li], 7) + 12;
@@ -1295,7 +1316,7 @@ static void draw_panel_security(int W, int H) {
 
   /* Onem derecesi filtresi (analist triyaji): TUMU + 4 seviye */
   {
-    const char *flabels[] = {"TUMU", "KRITIK", "YUKSEK", "ORTA", "DUSUK"};
+    const char *flabels[] = {"TÜMÜ", "KRİTİK", "YÜKSEK", "ORTA", "DÜŞÜK"};
     int fvals[] = {-1, 0, 1, 2, 3};
     Color fcolors[] = {COLOR_ACCENT, COLOR_RED, COLOR_ORANGE,
                        COLOR_YELLOW, COLOR_GREEN};
@@ -1326,7 +1347,7 @@ static void draw_panel_security(int W, int H) {
 
   /* Temizle butonu */
   Rectangle clr_btn = {W - 110, py + 6, 80, 20};
-  if (GuiButton(clr_btn, "TEMIZLE")) {
+  if (GuiButton(clr_btn, "TEMİZLE")) {
     ids_clear_alerts();
     g_ids_alert_count =
         ids_get_alerts_snapshot(g_ids_alerts_snapshot, IDS_MAX_GUI_ALERTS);
@@ -1338,9 +1359,9 @@ static void draw_panel_security(int W, int H) {
     int cy = py + (H - py) / 2;
     draw_shield_icon((float)cx, (float)cy - 10, 34,
                      ui_alpha(COLOR_GREEN, 24), COLOR_GREEN);
-    DrawTextC("Aktif tehdit alarmi yok.", cx - 75, cy + 26, 13, COLOR_GREEN);
+    DrawTextC("Aktif tehdit alarmı yok.", cx - 75, cy + 26, 13, COLOR_GREEN);
     if (!g_ids.running)
-      DrawTextC("IDS pasif — 'Agi Izle' ile ag trafigini analiz edin.",
+      DrawTextC("IDS pasif — 'Ağı İzle' ile ağ trafiğini analiz edin.",
                 cx - 190, cy + 48, 10, COLOR_TEXT_DIM);
     return;
   }
@@ -1383,13 +1404,13 @@ static void draw_panel_security(int W, int H) {
                          3, sc);
 
     /* Severity badge */
-    int slw = MeasureText(al->severity, 8) + 12;
+    int slw = MeasureText(sev_tr(al->severity), 8) + 12;
     DrawRectangleRounded((Rectangle){ir.x + 10, ir.y + 6, slw, 14}, 0.5f, 4,
                          ui_alpha(sc, 40));
     DrawRectangleRoundedLinesEx(
         (Rectangle){ir.x + 10, ir.y + 6, slw, 14}, 0.5f, 4, 1.0f,
         ui_alpha(sc, 120));
-    DrawTextC(al->severity, ir.x + 16, ir.y + 8, 8, sc);
+    DrawTextC(sev_tr(al->severity), ir.x + 16, ir.y + 8, 8, sc);
 
     /* Skor badge */
     snprintf(buf, sizeof(buf), "%.0f%% risk skoru", al->score * 100);
@@ -1471,10 +1492,10 @@ static void draw_panel_tools(int W, int H) {
   int y0 = 86;
 
   /* --- Alt sekmeler (segment kontrol) --- */
-  const char *stabs[] = {"Paket Izleme", "Site Karartma", "Port Tarayici"};
-  Color sclr[] = {COLOR_CYAN, COLOR_RED, COLOR_ACCENT2};
+  const char *stabs[] = {"Paket İzleme", "Site Karartma", "Port Tarayıcı", "Kameralar"};
+  Color sclr[] = {COLOR_CYAN, COLOR_RED, COLOR_ACCENT2, COLOR_GREEN};
   int stx = 16;
-  for (int i = 0; i < 3; i++) {
+  for (int i = 0; i < 4; i++) {
     int sw = MeasureText(stabs[i], 12) + 30;
     Rectangle sb = {(float)stx, (float)y0, (float)sw, 24};
     int sh = CheckCollisionPointRec(GetMousePosition(), sb);
@@ -1506,8 +1527,8 @@ static void draw_panel_tools(int W, int H) {
     /* --- Sol panel: Kontroller --- */
     DrawRoundedPanel((Rectangle){12, py, ctrl_w, panel_h}, COLOR_PANEL,
                      ui_alpha(COLOR_BORDER, 150));
-    draw_panel_title(18, py + 8, "Paket Izleme", 13, COLOR_ACCENT);
-    DrawTextC("ARAC-01", ctrl_w - MeasureText("ARAC-01", 8) - 12, py + 11, 8,
+    draw_panel_title(18, py + 8, "Paket İzleme", 13, COLOR_ACCENT);
+    DrawTextC("ARAÇ-01", ctrl_w - ui_text_w("ARAÇ-01", 8) - 12, py + 11, 8,
               COLOR_TEXT_DIM);
 
     int capture_for_this =
@@ -1557,7 +1578,7 @@ static void draw_panel_tools(int W, int H) {
     DrawRectangleRoundedLinesEx(ip_area, 0.04f, 4, 1.0f,
                                 ui_alpha(COLOR_BORDER, 90));
     int item_h = 20;
-    int ip_rows = g_mon_count; /* yalniz izleme listesi; "Tum Ag" satiri kaldirildi */
+    int ip_rows = g_mon_count; /* yalniz izleme listesi; "Tüm Ağ" satiri kaldirildi */
     float ip_max_scroll = ip_rows * item_h - ip_list_h;
     if (ip_max_scroll < 0)
       ip_max_scroll = 0;
@@ -1569,8 +1590,8 @@ static void draw_panel_tools(int W, int H) {
         g_scroll_nm_devices = ip_max_scroll;
     }
     BeginScissorModeScaled(ip_area.x, ip_area.y, ip_area.width, ip_area.height);
-    /* "Tum Ag" satiri kaldirildi: liste yalnizca izleme listesindeki
-     * cihazlari gosterir. "AGI IZLE" (spoof) yalnizca arka plan
+    /* "Tüm Ağ" satiri kaldirildi: liste yalnizca izleme listesindeki
+     * cihazlari gosterir. "AĞI İZLE" (spoof) yalnizca arka plan
      * yakalamayi yonetir; paket listesi IP secilinceye kadar bos durur. */
     for (int i = 0; i < g_mon_count; i++) {
       int iy = cy + i * item_h - (int)g_scroll_nm_devices;
@@ -1598,7 +1619,7 @@ static void draw_panel_tools(int W, int H) {
       }
     }
     if (g_mon_count == 0)
-      DrawTextC("Liste bos: izleme listesine cihaz ekleyin.",
+      DrawTextC("Liste boş: izleme listesine cihaz ekleyin.",
                 22, cy + item_h - 2, 8, ui_alpha(COLOR_TEXT_DIM, 160));
     EndScissorMode();
     draw_custom_scrollbar(ip_area.x + ip_area.width - 10, ip_area.y, 10,
@@ -1612,9 +1633,9 @@ static void draw_panel_tools(int W, int H) {
     /* --- Paket akisi kontrolleri (izleme yalnizca Alarm Merkezi'nden durur) --- */
     if (g_capture_all || g_capture_active_ip[0]) {
       draw_led(30, cy + 8, 4, COLOR_GREEN, 1);
-      DrawTextC("Trafik Izleniyor", 38, cy + 3, 10, COLOR_GREEN);
-      DrawTextC(g_capture_all ? "Tum Ag" : g_nm_target,
-                38 + MeasureText("Trafik Izleniyor", 10) + 10, cy + 3, 10,
+      DrawTextC("Trafik İzleniyor", 38, cy + 3, 10, COLOR_GREEN);
+      DrawTextC(g_capture_all ? "Tüm Ağ" : g_nm_target,
+                38 + MeasureText("Trafik İzleniyor", 10) + 10, cy + 3, 10,
                 COLOR_TEXT_SEC);
       cy += 18;
       if (GuiButton((Rectangle){24, cy, ctrl_w - 40, 26},
@@ -1624,11 +1645,11 @@ static void draw_panel_tools(int W, int H) {
       }
       cy += 30;
     } else if (g_nm_target[0] == '\0') {
-      DrawTextC("Bir hedef IP secin.", 24, cy + 4, 11, COLOR_TEXT_DIM);
+      DrawTextC("Bir hedef IP seçin.", 24, cy + 4, 11, COLOR_TEXT_DIM);
       cy += 20;
     } else {
       /* Izleme pasif: once izleme listesine cihaz eklenmeli */
-      DrawTextC("Izleme pasif - izleme listesine cihaz ekleyin, sonra AGI IZLE.",
+      DrawTextC("İzleme pasif - izleme listesine cihaz ekleyin, sonra AĞI İZLE.",
                 24, cy + 4, 9, COLOR_TEXT_DIM);
       cy += 20;
     }
@@ -1658,28 +1679,28 @@ static void draw_panel_tools(int W, int H) {
         snprintf(buf, sizeof(buf), "TAM MITM: hedef <-> %d cihaz zehirli", pcount);
         DrawTextC(buf, 24, cy, 8, COLOR_CYAN);
       } else if (g_capture_all) {
-        snprintf(buf, sizeof(buf), "%d cihaz gateway uzerinden zehirli",
+        snprintf(buf, sizeof(buf), "%d cihaz gateway üzerinden zehirli",
                  arp_spoof_get_target_count());
         DrawTextC(buf, 24, cy, 8, COLOR_TEXT_SEC);
       }
       cy += 14;
 
       snprintf(buf, sizeof(buf), "IP forward: v4 %s | v6 %s",
-               fwd4 == 1 ? "ACIK" : (fwd4 == 0 ? "KAPALI" : "?"),
-               fwd6 == 1 ? "ACIK" : (fwd6 == 0 ? "KAPALI" : "?"));
+               fwd4 == 1 ? "AÇIK" : (fwd4 == 0 ? "KAPALI" : "?"),
+               fwd6 == 1 ? "AÇIK" : (fwd6 == 0 ? "KAPALI" : "?"));
       DrawTextC(buf, 24, cy, 8, fwd4 == 1 ? COLOR_TEXT_SEC : COLOR_AMBER);
       cy += 14;
 
       if (!spoof_on) {
-        DrawTextC("Root / cap_net_raw gerekli - ARP spoof acilamadi.", 24, cy,
+        DrawTextC("Root / cap_net_raw gerekli - ARP spoof açılamadı.", 24, cy,
                   8, COLOR_RED);
         cy += 14;
       }
       if (wlan) {
-        DrawTextC("Wi-Fi yonetim modu: karsi cihaz kareleri 1'e 1 gorunmez!",
+        DrawTextC("Wi-Fi yönetim modu: karşı cihaz kareleri 1'e 1 görünmez!",
                   24, cy, 8, COLOR_AMBER);
         cy += 14;
-        DrawTextC("Ethernet + SPAN/rogue AP onerilir.", 24, cy, 8,
+        DrawTextC("Ethernet + SPAN/rogue AP önerilir.", 24, cy, 8,
                   COLOR_TEXT_DIM);
         cy += 14;
       }
@@ -1705,7 +1726,7 @@ static void draw_panel_tools(int W, int H) {
         DrawRectangleRoundedLinesEx(box, 0.25f, 4, 1.0f,
                                     ui_alpha(COLOR_BORDER, 150));
       }
-      DrawTextC("Kendi ARP trafigini gizle", 44, cy + 4, 9,
+      DrawTextC("Kendi ARP trafiğini gizle", 44, cy + 4, 9,
                 th ? COLOR_TEXT : COLOR_TEXT_SEC);
       if (th && IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
         g_nm_hide_own_arp = !g_nm_hide_own_arp;
@@ -1713,7 +1734,7 @@ static void draw_panel_tools(int W, int H) {
 
       if (full_monitor_pcap_record_is_active()) {
         draw_led(32, cy + 9, 4, COLOR_RED, 1);
-        if (GuiButton((Rectangle){44, cy, 96, 22}, "Kaydi Durdur")) {
+        if (GuiButton((Rectangle){44, cy, 96, 22}, "Kaydı Durdur")) {
           full_monitor_pcap_record_stop();
           g_pcap_rec_fail = 0;
         }
@@ -1732,10 +1753,10 @@ static void draw_panel_tools(int W, int H) {
           else
             g_pcap_rec_fail = 0;
         }
-        DrawTextC("Izleme aktifken tum trafigi .pcap dosyasina kaydeder", 24,
+        DrawTextC("İzleme aktifken tüm trafiği .pcap dosyasına kaydeder", 24,
                   cy + 24, 7, COLOR_TEXT_DIM);
         if (g_pcap_rec_fail) {
-          DrawTextC("Kayit icin once bir izleme baslatin!", 24, cy + 34, 7,
+          DrawTextC("Kayıt için önce bir izleme başlatın!", 24, cy + 34, 7,
                     COLOR_RED);
           cy += 44;
         } else {
@@ -1824,7 +1845,7 @@ static void draw_panel_tools(int W, int H) {
       int d = MeasureText("Toplam: ", 10);
       DrawTextC(buf, 24 + d + 10, cy, 10, COLOR_GREEN);
       if (g_nm_flow_paused) {
-        DrawTextC("AKIS DURAKLATILDI - izleme arka planda suruyor", 24,
+        DrawTextC("AKIŞ DURAKLATILDI - izleme arka planda sürüyor", 24,
                   cy + 12, 8, COLOR_AMBER);
       } else if (!capture_for_this) {
         char st[128];
@@ -1832,7 +1853,7 @@ static void draw_panel_tools(int W, int H) {
         DrawTextC(st, 24, cy + 12, 8, COLOR_AMBER);
       }
     } else if (g_nm_target[0]) {
-      DrawTextC("Izleme baslatilmadi.", 24, cy, 10, COLOR_TEXT_DIM);
+      DrawTextC("İzleme başlatılmadı.", 24, cy, 10, COLOR_TEXT_DIM);
     }
     cy += 24;
 
@@ -1840,7 +1861,7 @@ static void draw_panel_tools(int W, int H) {
     if (show_packets) {
       int ly = py + panel_h - 100;
       DrawRectangle(24, ly, ctrl_w - 40, 1, ui_alpha(COLOR_BORDER, 120));
-      DrawTextC("AKTIVITE (son 12)", 24, ly + 8, 8, COLOR_TEXT_DIM);
+      DrawTextC("AKTİVİTE (son 12)", 24, ly + 8, 8, COLOR_TEXT_DIM);
 
       char slots[512];
       int nslots = full_monitor_activity_slots(slots, sizeof(slots));
@@ -1903,20 +1924,20 @@ static void draw_panel_tools(int W, int H) {
       draw_panel_title(rx + 12, py + 8, buf, 13, COLOR_ACCENT);
     } else {
       /* Hedef secilmeden liste akmaz; baslik da "Paket Listesi" kalir.
-       * Spoof/tum-ag durumu sol paneldeki "Trafik Izleniyor" satiriyla
+       * Spoof/tum-ag durumu sol paneldeki "Trafik İzleniyor" satiriyla
        * aynen gorunur. */
       draw_panel_title(rx + 12, py + 8, "Paket Listesi", 13, COLOR_ACCENT);
     }
     /* SPAN / port mirror tespiti: yabanci MAC kaynakli kareler yuksekse uyar */
     if (capture_for_this && full_monitor_mirror_suspected()) {
       char mbuf[96];
-      snprintf(mbuf, sizeof(mbuf), "MIRROR? yabanci:%d",
+      snprintf(mbuf, sizeof(mbuf), "MIRROR? yabancı:%d",
                full_monitor_get_foreign_frame_count());
       draw_badge(rx + 150, py + 7, mbuf, 8, COLOR_AMBER);
     }
     if (g_selected_packet_num != -1) {
       Rectangle back_btn = {rx + result_w - 80, py + 5, 70, 18};
-      if (GuiButton(back_btn, "Geri Don")) {
+      if (GuiButton(back_btn, "Geri Dön")) {
         g_selected_packet_num = -1;
         g_scroll_pdu_detail = 0;
       }
@@ -1964,7 +1985,7 @@ static void draw_panel_tools(int W, int H) {
       /* Gecersiz ifade: kirmizi cerceve + panel usti uyari yazisi */
       if (!fv) {
         DrawRectangleLinesEx(fbb, 1, COLOR_RED);
-        DrawTextC("Gecersiz ifade", rx + result_w - 170, py + 10, 9,
+        DrawTextC("Geçersiz ifade", rx + result_w - 170, py + 10, 9,
                   COLOR_RED);
       }
 
@@ -1998,13 +2019,13 @@ static void draw_panel_tools(int W, int H) {
       if (nm_dpc == 0) {
         const char *msg;
         if (!g_nm_target[0])
-          msg = "Bir hedef IP secin."; /* Port Tarayici davranisi: once hedef */
+          msg = "Bir hedef IP seçin."; /* Port Tarayici davranisi: once hedef */
         else if (!capture_for_this)
-          msg = "Izleme baslatilmadi.";
+          msg = "İzleme başlatılmadı.";
         else if (g_pkt_filter[0])
           msg = "Filtreye uyan paket yok.";
         else
-          msg = "Henuz paket yakalanmadi.";
+          msg = "Henüz paket yakalanmadı.";
         int mw = MeasureText(msg, 12);
         DrawTextC(msg, rx + result_w / 2 - mw / 2, py + panel_h / 2, 12,
                   COLOR_TEXT_SEC);
@@ -2280,7 +2301,7 @@ static void draw_panel_tools(int W, int H) {
     DrawRoundedPanel((Rectangle){12, py, ctrl_w, panel_h}, COLOR_PANEL,
                      ui_alpha(COLOR_BORDER, 150));
     draw_panel_title(18, py + 8, "Site Karartma", 13, COLOR_RED);
-    DrawTextC("ARAC-03", ctrl_w - MeasureText("ARAC-03", 8) - 12, py + 11, 8,
+    DrawTextC("ARAÇ-03", ctrl_w - ui_text_w("ARAÇ-03", 8) - 12, py + 11, 8,
               COLOR_TEXT_DIM);
 
     int cy = py + 28;
@@ -2291,15 +2312,15 @@ static void draw_panel_tools(int W, int H) {
     DrawTextC(en ? "KARARTMA AKTIF" : "KARARTMA KAPALI", 38, cy + 2, 10,
               en ? COLOR_GREEN : COLOR_TEXT_DIM);
     if (GuiButton((Rectangle){ctrl_w - 72, cy - 2, 60, 20},
-                  en ? "Kapat" : "Ac")) {
+                  en ? "Kapat" : "AÇ")) {
       site_block_set_enabled(!en);
-      mon_notice_set(en ? "Site karartma kapatildi."
-                        : "Site karartma acildi.");
+      mon_notice_set(en ? "Site karartma kapatıldı."
+                        : "Site karartma açıldı.");
     }
     cy += 24;
 
     if (!st.raw_ready) {
-      DrawTextC("Ham enjeksiyon hazir degil (root / arayuz?).", 20, cy, 9,
+      DrawTextC("Ham enjeksiyon hazır değil (root / arayüz?).", 20, cy, 9,
                 COLOR_AMBER);
       cy += 14;
     }
@@ -2311,12 +2332,12 @@ static void draw_panel_tools(int W, int H) {
     DrawTextC("Hedef Cihaz (izleme listesi):", 20, cy, 10, COLOR_TEXT_SEC);
     cy += 14;
     if (g_sb_show_all) {
-      int chip_w = 6 + MeasureText("Tum IP'ler", 10) + 12;
+      int chip_w = 6 + MeasureText("Tüm IP'ler", 10) + 12;
       DrawRectangleRounded((Rectangle){20, cy - 2, chip_w, 14}, 0.5f, 4,
                            ui_alpha(COLOR_RED, 26));
       DrawRectangleRoundedLinesEx((Rectangle){20, cy - 2, chip_w, 14}, 0.5f, 4,
                                   1.0f, ui_alpha(COLOR_RED, 90));
-      DrawTextC("Tum IP'ler", 26, cy, 10, COLOR_RED);
+      DrawTextC("Tüm IP'ler", 26, cy, 10, COLOR_RED);
     } else if (g_sb_target[0]) {
       int chip_w = 6 + MeasureText(g_sb_target, 10) + 12;
       DrawRectangleRounded((Rectangle){20, cy - 2, chip_w, 14}, 0.5f, 4,
@@ -2325,7 +2346,7 @@ static void draw_panel_tools(int W, int H) {
                                   1.0f, ui_alpha(COLOR_RED, 90));
       DrawTextC(g_sb_target, 26, cy, 10, COLOR_RED);
     } else {
-      DrawTextC("(goruntulemek icin soldan cihaz secin)", 20, cy, 9,
+      DrawTextC("(görüntülemek için soldan cihaz seçin)", 20, cy, 9,
                 COLOR_TEXT_DIM);
     }
     cy += 16;
@@ -2336,7 +2357,7 @@ static void draw_panel_tools(int W, int H) {
     DrawRectangleRoundedLinesEx(sb_ip_area, 0.04f, 4, 1.0f,
                                 ui_alpha(COLOR_BORDER, 110));
     int sb_item_h = 18;
-    int sb_items = g_mon_count + 1; /* satir 0 = "Tum IP'ler" */
+    int sb_items = g_mon_count + 1; /* satir 0 = "Tüm IP'ler" */
     float sb_ip_max = sb_items * sb_item_h - sb_ip_h;
     if (sb_ip_max < 0)
       sb_ip_max = 0;
@@ -2350,7 +2371,7 @@ static void draw_panel_tools(int W, int H) {
     BeginScissorModeScaled(sb_ip_area.x, sb_ip_area.y, sb_ip_area.width,
                            sb_ip_area.height);
     if (g_mon_count == 0) {
-      DrawTextC("Izleme listesi bos (Kontrol Paneli'nden ekleyin).", 26,
+      DrawTextC("İzleme listesi boş (Kontrol Paneli'nden ekleyin).", 26,
                 cy + sb_item_h + 4, 9, COLOR_TEXT_DIM);
     }
     for (int i = 0; i < sb_items; i++) {
@@ -2358,7 +2379,7 @@ static void draw_panel_tools(int W, int H) {
       if (iy + sb_item_h < cy || iy > cy + sb_ip_h)
         continue;
       Rectangle db = {22, iy + 1, ctrl_w - 44, sb_item_h - 2};
-      const char *ip = (i == 0) ? "Tum IP'ler" : g_mon_ips[i - 1];
+      const char *ip = (i == 0) ? "Tüm IP'ler" : g_mon_ips[i - 1];
       int sel = (i == 0) ? g_sb_show_all
                          : (!g_sb_show_all && strcmp(g_sb_target, g_mon_ips[i - 1]) == 0);
       int hov = CheckCollisionPointRec(GetMousePosition(), db);
@@ -2391,9 +2412,9 @@ static void draw_panel_tools(int W, int H) {
     cy += 8;
 
     /* --- Alan adi giris kutusu --- */
-    DrawTextC("Alan Adi (facebook.com):", 20, cy, 10, COLOR_TEXT_SEC);
+    DrawTextC("Alan Adı (facebook.com):", 20, cy, 10, COLOR_TEXT_SEC);
     cy += 13;
-    DrawTextC("Joker: *youtube.com (alt alan)  *youtube* (icerir)", 20, cy, 8,
+    DrawTextC("Joker: *youtube.com (alt alan)  *youtube* (içerir)", 20, cy, 8,
               COLOR_TEXT_DIM);
     cy += 12;
     Rectangle dbox = {20, cy, ctrl_w - 40, 24};
@@ -2411,7 +2432,7 @@ static void draw_panel_tools(int W, int H) {
     DrawTextC("Mod:", 20, cy, 10, COLOR_TEXT_SEC);
     int mbw = (ctrl_w - 56) / 3;
     int modes[3] = {SB_MODE_SINKHOLE, SB_MODE_RST, SB_MODE_BOTH};
-    const char *mlabels[3] = {"DNS", "RST", "Ikisi"};
+    const char *mlabels[3] = {"DNS", "RST", "İkisi"};
     for (int m = 0; m < 3; m++) {
       Rectangle mbr = {(float)(22 + m * (mbw + 4)), (float)(cy + 12),
                        (float)mbw, 20};
@@ -2431,11 +2452,11 @@ static void draw_panel_tools(int W, int H) {
 
     /* --- Kural ekle --- */
     if (!g_sb_domain[0]) {
-      DrawTextC("Engellemek icin alan adi girin.", 20, cy, 9, COLOR_TEXT_DIM);
+      DrawTextC("Engellemek için alan adı girin.", 20, cy, 9, COLOR_TEXT_DIM);
       cy += 22;
     } else {
-      const char *blabel = g_sb_target[0] ? "Bu cihaz icin engelle"
-                                          : "Tum cihazlar icin engelle";
+      const char *blabel = g_sb_target[0] ? "Bu cihaz için engelle"
+                                          : "Tüm cihazlar için engelle";
       if (GuiButton((Rectangle){22, cy, ctrl_w - 46, 24}, blabel)) {
         const char *tip = g_sb_target[0] ? g_sb_target : "*";
         int r = site_block_add_rule(tip, g_sb_domain, g_sb_mode);
@@ -2468,7 +2489,7 @@ static void draw_panel_tools(int W, int H) {
              st.sinkholed, st.rst_sent, st.icmp_sent);
     DrawTextC(buf, 20, cy, 9, COLOR_CYAN);
     cy += 12;
-    snprintf(buf, sizeof(buf), "Gozlem:%lu  Kural:%d  Kapsam:%d",
+    snprintf(buf, sizeof(buf), "Gözlem:%lu  Kural:%d  Kapsam:%d",
              st.observed, site_block_rule_count(), st.scope_count);
     DrawTextC(buf, 20, cy, 9, COLOR_TEXT_DIM);
 
@@ -2507,17 +2528,17 @@ static void draw_panel_tools(int W, int H) {
     }
     if (g_sb_show_all || g_sb_target[0]) {
       snprintf(buf, sizeof(buf), "Filtre: %s",
-               g_sb_target[0] ? g_sb_target : "Tum IP'ler");
+               g_sb_target[0] ? g_sb_target : "Tüm IP'ler");
       int flw = MeasureText(buf, 9);
       DrawTextC(buf, rx + result_w - 76 - flw - 8, py + 9, 9, COLOR_RED);
     }
     BeginScissorModeScaled(oarea.x, oarea.y, oarea.width, oarea.height);
     if (ovis == 0) {
       const char *hint = g_sb_show_all
-          ? "Gozlem yok."
+          ? "Gözlem yok."
           : g_sb_target[0]
-              ? "Secili cihaz icin gozlem yok."
-              : "Soldan bir cihaz secin ya da 'Tum IP'ler'i secin.";
+              ? "Seçili cihaz için gözlem yok."
+              : "Soldan bir cihaz seçin ya da 'Tüm IP'ler'i seçin.";
       DrawTextC(hint, rx + 12, oly0 + 8, 10, COLOR_TEXT_DIM);
     }
     int oi = 0;
@@ -2549,18 +2570,18 @@ static void draw_panel_tools(int W, int H) {
       DrawTextC(buf, ob.x + ob.width - 88, ob.y + 4, 8, COLOR_TEXT_DIM);
       if (GuiButton((Rectangle){ob.x + ob.width - 42, ob.y + 2, 36,
                                 orow_h - 6},
-                    o->blocked ? "Ac" : "Blok")) {
+                    o->blocked ? "AÇ" : "Blok")) {
         if (o->blocked) {
           /* Tum eslesen kurallari kaldir (wildcard dahil) + gozlem
            * bayraklarini tazele: satir aninda normale doner. */
           int n = site_block_unblock_observed(o->ip, o->domain);
           if (n > 0) {
-            snprintf(buf, sizeof(buf), "%d kural kaldirildi.", n);
+            snprintf(buf, sizeof(buf), "%d kural kaldırıldı.", n);
             mon_notice_set(buf);
           }
         } else {
           site_block_block_observed(o->ip, o->domain, g_sb_mode);
-          mon_notice_set("Gozlemden kural eklendi.");
+          mon_notice_set("Gözlemden kural eklendi.");
         }
       }
     }
@@ -2587,7 +2608,7 @@ static void draw_panel_tools(int W, int H) {
     DrawTextC(buf, rx + result_w - cntw - 14, ry0 + 9, 9, COLOR_TEXT_DIM);
     if (g_sb_show_all || g_sb_target[0]) {
       snprintf(buf, sizeof(buf), "Filtre: %s",
-               g_sb_target[0] ? g_sb_target : "Tum IP'ler");
+               g_sb_target[0] ? g_sb_target : "Tüm IP'ler");
       int flw = MeasureText(buf, 9);
       DrawTextC(buf, rx + result_w - cntw - 14 - flw - 8, ry0 + 9, 9, COLOR_RED);
     }
@@ -2610,8 +2631,8 @@ static void draw_panel_tools(int W, int H) {
       const char *hint = g_sb_show_all
           ? "Kural yok."
           : g_sb_target[0]
-              ? "Secili cihaz icin kural yok."
-              : "Soldan bir cihaz secin ya da 'Tum IP'ler'i secin.";
+              ? "Seçili cihaz için kural yok."
+              : "Soldan bir cihaz seçin ya da 'Tüm IP'ler'i seçin.";
       DrawTextC(hint, rx + 12, rcarea.y + 8, 10, COLOR_TEXT_DIM);
     }
     int ri = 0;
@@ -2635,7 +2656,7 @@ static void draw_panel_tools(int W, int H) {
       Color mcol = (rr.mode == SB_MODE_SINKHOLE) ? COLOR_CYAN
                  : (rr.mode == SB_MODE_RST) ? COLOR_AMBER : COLOR_RED;
       const char *mt = (rr.mode == SB_MODE_SINKHOLE) ? "DNS"
-                     : (rr.mode == SB_MODE_RST) ? "RST" : "IKISI";
+                     : (rr.mode == SB_MODE_RST) ? "RST" : "İKİSİ";
       DrawTextC(rr.ip, rb.x + 8, rb.y + 4, 10, COLOR_TEXT_SEC);
       DrawTextC(rr.domain, rb.x + 112, rb.y + 4, 10, COLOR_TEXT);
       DrawTextC(mt, rb.x + rb.width - 144, rb.y + 5, 8, mcol);
@@ -2661,8 +2682,8 @@ static void draw_panel_tools(int W, int H) {
     /* --- Sol panel: Kontroller --- */
     DrawRoundedPanel((Rectangle){12, py, ctrl_w, panel_h}, COLOR_PANEL,
                      ui_alpha(COLOR_BORDER, 150));
-    draw_panel_title(18, py + 8, "Port Tarayici", 13, COLOR_ACCENT2);
-    DrawTextC("ARAC-02", ctrl_w - MeasureText("ARAC-02", 8) - 12, py + 11, 8,
+    draw_panel_title(18, py + 8, "Port Tarayıcı", 13, COLOR_ACCENT2);
+    DrawTextC("ARAÇ-02", ctrl_w - ui_text_w("ARAÇ-02", 8) - 12, py + 11, 8,
               COLOR_TEXT_DIM);
 
     portscan_get_results(&g_portscan);
@@ -2730,10 +2751,10 @@ static void draw_panel_tools(int W, int H) {
 
     /* --- Tarama butonlari / ilerleme durumu --- */
     if (g_ps_target[0] == '\0') {
-      DrawTextC("Bir hedef IP secin.", 24, cy + 4, 11, COLOR_TEXT_DIM);
+      DrawTextC("Bir hedef IP seçin.", 24, cy + 4, 11, COLOR_TEXT_DIM);
       cy += 20;
     } else if (!scanning) {
-      DrawTextC("Tarama Baslat:", 24, cy, 10, COLOR_TEXT_SEC);
+      DrawTextC("Tarama Başlat:", 24, cy, 10, COLOR_TEXT_SEC);
       cy += 16;
       int bw = (ctrl_w - 56) / 2;
       if (GuiButton((Rectangle){24, cy, bw, 26}, "Top Portlar"))
@@ -2784,13 +2805,13 @@ static void draw_panel_tools(int W, int H) {
 
     /* --- Sonuc ozeti --- */
     if (is_this && (g_portscan.open_count > 0 || g_portscan.scan_complete)) {
-      snprintf(buf, sizeof(buf), "Acik: %d", g_portscan.open_count);
+      snprintf(buf, sizeof(buf), "Açık: %d", g_portscan.open_count);
       DrawTextC(buf, 24, cy, 12, COLOR_GREEN);
       cy += 16;
-      snprintf(buf, sizeof(buf), "Filtrelenmis: %d", g_portscan.filtered_count);
+      snprintf(buf, sizeof(buf), "Filtrelenmiş: %d", g_portscan.filtered_count);
       DrawTextC(buf, 24, cy, 10, COLOR_AMBER);
       cy += 13;
-      snprintf(buf, sizeof(buf), "Taranan: %d / Sure: %.1fs",
+      snprintf(buf, sizeof(buf), "Taranan: %d / Süre: %.1fs",
                g_portscan.total_scanned, g_portscan.scan_time_sec);
       DrawTextC(buf, 24, cy, 10, COLOR_TEXT_SEC);
       cy += 13;
@@ -2805,18 +2826,18 @@ static void draw_panel_tools(int W, int H) {
         DrawTextC(buf, 24, cy, 10, COLOR_RED);
       }
     } else if (g_ps_target[0] && !is_this && !scanning) {
-      DrawTextC("Sonuc yok.", 24, cy, 10, COLOR_TEXT_DIM);
+      DrawTextC("Sonuç yok.", 24, cy, 10, COLOR_TEXT_DIM);
     }
 
     /* --- Sag panel: Sonuc tablosu --- */
     int rx = 12 + ctrl_w + 8;
     DrawRoundedPanel((Rectangle){rx, py, result_w, panel_h}, COLOR_PANEL,
                      ui_alpha(COLOR_BORDER, 150));
-    draw_panel_title(rx + 12, py + 8, "Tarama Sonuclari", 13, COLOR_ACCENT2);
+    draw_panel_title(rx + 12, py + 8, "Tarama Sonuçları", 13, COLOR_ACCENT2);
 
     /* Durum LED'i (sag panel basligi yaninda) */
     if (is_this) {
-      int tw = MeasureText("Tarama Sonuclari", 13);
+      int tw = MeasureText("Tarama Sonuçları", 13);
       Color led_c = scanning ? COLOR_AMBER
                    : (g_portscan.scan_complete && g_portscan.open_count > 0)
                        ? COLOR_GREEN
@@ -2848,7 +2869,7 @@ static void draw_panel_tools(int W, int H) {
     DrawTextC("Port", rx + 10, hdr_y + 4, 9, COLOR_TEXT_SEC);
     DrawTextC("Durum", rx + 60, hdr_y + 4, 9, COLOR_TEXT_SEC);
     DrawTextC("Servis", rx + 120, hdr_y + 4, 9, COLOR_TEXT_SEC);
-    DrawTextC("Urun/Versiyon", rx + 200, hdr_y + 4, 9, COLOR_TEXT_SEC);
+    DrawTextC("Ürün/Versiyon", rx + 200, hdr_y + 4, 9, COLOR_TEXT_SEC);
     DrawTextC("Vuln", rx + result_w - 140, hdr_y + 4, 9, COLOR_TEXT_SEC);
     DrawTextC("SSL", rx + result_w - 100, hdr_y + 4, 9, COLOR_TEXT_SEC);
     DrawTextC("RTT", rx + result_w - 60, hdr_y + 4, 9, COLOR_TEXT_SEC);
@@ -2858,12 +2879,12 @@ static void draw_panel_tools(int W, int H) {
 
     if (!is_this || (g_portscan.open_count == 0 && !g_portscan.scan_complete)) {
       const char *msg =
-          scanning ? "Tarama devam ediyor..." : "Tarama baslatilmadi.";
+          scanning ? "Tarama devam ediyor..." : "Tarama başlatılmadı.";
       int mw = MeasureText(msg, 12);
       DrawTextC(msg, rx + result_w / 2 - mw / 2, py + panel_h / 2, 12,
                 COLOR_TEXT_SEC);
     } else if (g_portscan.open_count == 0 && g_portscan.scan_complete) {
-      DrawTextC("Acik port bulunamadi.", rx + result_w / 2 - 70,
+      DrawTextC("Açık port bulunamadı.", rx + result_w / 2 - 70,
                 py + panel_h / 2, 12, COLOR_GREEN);
     } else {
       /* Row height: normal=22, expanded vuln=22 + vuln_count*16 + 8 */
@@ -3024,6 +3045,10 @@ static void draw_panel_tools(int W, int H) {
                             &g_scroll_tool_ports);
     }
   }
+  else if (g_tools_subtab == 3) {
+    /* === Kameralar (Kesif / Erisim / Izleme) === */
+    gui_camera_draw_tools_panel(W, H);
+  }
 }
 
 
@@ -3093,26 +3118,48 @@ void gui_init(int width, int height) {
       }
     }
     if (font_path) {
-      g_custom_font = LoadFontEx(font_path, 64, 0, 250);
-      TraceLog(LOG_INFO, "FONT: %s yuklendi", font_path);
+      /* Türkçe glifler (ıİşŞğĞçÇöÖüÜ) ASCII'de yok; LoadFontEx'e codepoints
+       * verilmezse yalnızca ASCII (ilk 250 glif) yüklenir ve Türkçe harfler
+       * '?' olarak çizilir. Latin-1 Supplement + Latin Extended-A'yı (0xA0..
+       * 0x017F) ve arayüzde kullanılan ek işaretleri açıkça istiyoruz. */
+      int cps[0x0180 - 0x20 + 16];
+      int n = 0;
+      for (int cp = 0x20; cp < 0x7F; cp++)   cps[n++] = cp; /* ASCII */
+      for (int cp = 0xA0; cp < 0x0180; cp++) cps[n++] = cp; /* Latin-1 + Ext-A */
+      {
+        static const int extras[] = {0x2013, 0x2014, 0x2018, 0x2019,
+                                     0x201C, 0x201D, 0x2022, 0x2026,
+                                     0x2192, 0x25B8};
+        for (unsigned k = 0; k < sizeof(extras) / sizeof(extras[0]); k++)
+          cps[n++] = extras[k];
+      }
+      g_custom_font = LoadFontEx(font_path, 64, cps, n);
+      TraceLog(LOG_INFO, "FONT: %s yüklendi (%d glif)", font_path, n);
     } else {
       TraceLog(LOG_WARNING,
-               "FONT: Roboto-Regular.ttf bulunamadi, varsayilan fonta dusuluyor");
+               "FONT: Roboto-Regular.ttf bulunamadı, varsayılan fonta düşülüyor");
     }
   }
   if (g_custom_font.texture.id > 0) {
     SetTextureFilter(g_custom_font.texture, TEXTURE_FILTER_BILINEAR);
     GuiSetFont(g_custom_font);
   }
+
+  /* Kamera kesif/erisim/izleme modulu (backend + yuzeyler) */
+  gui_camera_init();
 }
 
 void gui_cleanup(void) {
+  gui_camera_cleanup();
   if (g_custom_font.texture.id > 0)
     UnloadFont(g_custom_font);
   CloseWindow();
 }
 
 int gui_should_close(void) { return WindowShouldClose(); }
+
+Font  gui_font(void)  { return g_custom_font; }
+float gui_scale(void) { return g_ui_scale; }
 
 void gui_draw(void) {
   int monitor = GetCurrentMonitor();
@@ -3150,7 +3197,7 @@ void gui_draw(void) {
     if ((g_capture_all || g_capture_active_ip[0]) && g_scan.local_iface[0] &&
         g_capture_iface[0] && strcmp(g_capture_iface, g_scan.local_iface) != 0) {
       fprintf(stderr,
-              "[GUI] Arayuz degisti: %s -> %s, izleme yeniden baslatiliyor\n",
+              "[GUI] Arayüz değişti: %s -> %s, izleme yeniden başlatılıyor\n",
               g_capture_iface, g_scan.local_iface);
       int was_all = g_capture_all;
       char saved_ip[MAX_IP_LEN];
@@ -3184,6 +3231,9 @@ void gui_draw(void) {
     }
     g_last_refresh = now;
   }
+
+  /* Kamera modulu: backend durum senkronizasyonu + stream yoklama */
+  gui_camera_tick();
 
   BeginDrawing();
   ClearBackground(COLOR_BG);

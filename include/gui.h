@@ -55,6 +55,10 @@ typedef enum {
     TAB_COUNT
 } GuiTab;
 
+/* ========== Paylasilan cizim baglami (gui_camera vb. moduller icin) ========== */
+Font  gui_font(void);   /* aktif TTF (yoksa texture.id==0) */
+float gui_scale(void);  /* mantiksal->fiziksel olcek (Camera2D zoom) */
+
 /* ========== Genel API (degismedi) ========== */
 void gui_init(int width, int height);
 void gui_cleanup(void);

@@ -1,9 +1,9 @@
 # BEAT System
 
 **Tek pencereden yerel ağ güvenliği:** cihaz keşfi, canlı trafik görünürlüğü,
-kural tabanlı saldırı tespiti (IDS) ve aktif müdahale (ağdan kesme / site
-karartma) — hepsi C11 ile yazılmış, Raylib tabanlı tek bir masaüstü
-uygulamasında.
+kural tabanlı saldırı tespiti (IDS), aktif müdahale (ağdan kesme / site
+karartma) ve **IP kamera keşfi → otonom erişim → uygulama-içi canlı izleme** —
+hepsi C11 ile yazılmış, Raylib tabanlı tek bir masaüstü uygulamasında.
 
 ---
 
@@ -27,6 +27,13 @@ hem IDS tarafından puanlanır, hem de müdahale motorlarına girdi olur.
 
 Buna ek olarak hedef bazlı derinlemesine inceleme için `port_scanner` (stealth
 port/servis/zafiyet taraması) ayrı bir araç sekmesinde sunulur.
+
+Aynı konsol, **IP kameralarına özel paralel bir hat** da çalıştırır: kameraları
+bulur (`camera_discovery`), bilinen zafiyet/kimlik yollarını sondalar
+(`camera_vuln`), otonom veya elle erişim kurar (`camera_access`) ve görüntüyü
+uygulama penceresi içinde canlı gösterir (`video_stream`). Bu hat, aşağıdaki
+klasik IDS hattından bağımsız ilerler ama aynı ağ keşfi ve aynı tek-pencere
+felsefesini paylaşır.
 
 ### Veri hattı (modüller nasıl bağlanıyor?)
 
@@ -71,6 +78,40 @@ adını (`app_domain`: DNS / TLS SNI / HTTP Host / QUIC SNI) paket kaydına
 yani "hangi cihaz hangi siteye gitti" bilgisi tek yerde üretilir ve tüm
 modüller aynı gerçeği görür.
 
+### Kamera hattı (paralel, IDS'ten bağımsız)
+
+Kamera hattı, yukarıdaki IDS/İzleme-Listesi veri hattından **ayrı** çalışır ve
+İzleme Listesi'ne bağlı değildir. Kendi keşif → erişim → izleme zincirini
+kurar:
+
+```
+  camera_discovery ──────────────► CameraDevice[] (kanıt + güven skoru)
+    • ARP + kamera imzalı port taraması
+    • RTSP OPTIONS/DESCRIBE sondası
+    • HTTP web arayüzü imzası
+    • ONVIF WS-Discovery (3702)
+    • SSDP/UPnP (1900) + mDNS (5353)
+    • MAC OUI kamera üreticisi
+    └─ self IP / gateway / broadcast / multicast / link-local DIŞLANIR
+                                 │
+                                 ▼
+  camera_vuln ───────────────────┤  parmak izi + zafiyet
+    • device-info endpoint (model/firmware/seril)
+    • Hikvision ISAPI / Dahua RPC2 / Xiongmai backdoor sondaları
+    • ONVIF device-service (WS-UsernameToken / Basic / Digest)
+                                 │
+                                 ▼
+  camera_access ─────────────────┤  otonom erişim (arka plan işçi)
+    • RTSP yol keşfi + kimliksiz açık akış
+    • varsayılan kimlik DB (~96) + harici wordlist
+    • Basic/Digest doğrulama + HTTP snapshot
+                                 │
+                                 ▼
+  video_stream ──────────────────┘  uygulama-içi izleme
+    • görünmez ffmpeg alt-süreci → RGB kare → Texture2D
+    • çoklu akış grid, snapshot, kayıt, otomatik reconnect
+```
+
 ### İzleme Listesi (Scope)
 
 Diyagramda gördüğünüz gibi **port taraması dışındaki her şey İzleme
@@ -87,10 +128,10 @@ yönetir:
 > üzere Kontrol Paneli'ndeki **TÜMÜNÜ EKLE** düğmesini kullanın. Boş bir listeyle
 > GUI'de paket izleme görünümü çalışmaz ve IDS **pasif** kalır.
 
-**İzleme Listesi'ne bakmayan iki yüzey** diyagramda ayrı kutuda gösterilmiştir:
-`port_scanner` (hedefi manuel seçersiniz) ve ARP Black-Hole **KES/AÇ**
-(cihaz satırından tek tıkla tetiklenir). Bunlar dışındaki tüm işlevler, izleme
-listesinin dolu olmasına bağlıdır.
+**İzleme Listesi'ne bakmayan üç yüzey** diyagramda ayrı kutuda gösterilmiştir:
+`port_scanner` (hedefi manuel seçersiniz), ARP Black-Hole **KES/AÇ**
+(cihaz satırından tek tıkla tetiklenir) ve **kamera hattı**. Bunlar dışındaki
+tüm işlevler, izleme listesinin dolu olmasına bağlıdır.
 
 ---
 
@@ -110,26 +151,38 @@ listesinin dolu olmasına bağlıdır.
 | **QUIC SNI Çözümleme** | UDP/443 (HTTP/3) Initial paketinden TLS SNI çıkarır (OpenSSL varsa) |
 | **Stealth Port Tarayıcı** | Nmap bağımsız; TCP CONNECT/SYN/FIN/NULL/Xmas/ACK/Window/Maimon/UDP/Idle/FTP-bounce/SCTP/IP-proto; jitter, gecikme, decoy; TTL tabanlı OS tahmini ve CVE notları |
 | **Headless Mod** | GUI olmadan IDS çalıştırır; uyarıları stdout + JSONL dosyasına yazar (SIEM entegrasyonu / FP ölçümü) |
+| **IP Kamera Keşfi** | ARP + kamera-imzalı port taraması (554/8554/8555/37777/34567/8000/… ) + RTSP OPTIONS/DESCRIBE + HTTP web arayüzü imzası + ONVIF WS-Discovery + SSDP/UPnP + mDNS + MAC OUI; kanıt maskesi (port/RTSP/401/HTTP/ONVIF/OUI/üretici portu) ve 0-100 güven skoru. Kendi IP, gateway, broadcast, multicast ve link-local adresler otomatik dışlanır |
+| **Kamera Parmak İzi & Zafiyet** | Üretici device-info endpoint parmak izi (model/firmware/seril); Hikvision ISAPI auth-token, Dahua RPC2 login, Xiongmai backdoor ve anonim device-info sondaları; ONVIF device-service istemcisi (GetDeviceInformation / GetProfiles / GetStreamUri) WS-UsernameToken (PasswordDigest) + Basic + Digest fallback |
+| **Otonom Kamera Erişimi** | RTSP yol keşfi, kimliksiz açık akış denemesi, ~96 geniş varsayılan kimlik DB'si + harici wordlist, Basic/Digest doğrulama, elle kimlik girişi ve HTTP snapshot; tüm ağ işlemleri tek arka plan işçi thread'inde (arayüz bloke olmaz) |
+| **Uygulama-içi İzleme** | Görünmez `ffmpeg` alt-süreci ile RTSP/MJPEG çözüp raylib texture'a basar (harici oynatıcı/browser yok); çoklu akış grid (`VS_MAX_STREAMS=8`), anlık kare (snapshot), kayıt (yeniden kodlama yok), otomatik yeniden bağlanma, yazılım/VAAPI/NVDEC decode |
 
 ---
 
 ## 3. Arayüz (GUI)
 
-Uygulama üç sekmeden oluşur:
+Uygulama üç ana sekmeden oluşur:
 
 - **Kontrol Paneli** — `AĞDAKİ CİHAZLAR` listesi, cihaz detayı, **`İZLEME LİSTESİ`**,
   `ENGELLENEN CİHAZLAR` paneli ve `TARAMA KAYITLARI`. Cihaz satırındaki
   **KES/AÇ** düğmesi ARP black-hole motorunu tetikler; keşif sonrası listeye
-  cihaz eklemek için **TÜMÜNÜ EKLE** kullanılır.
+  cihaz eklemek için **TÜMÜNÜ EKLE** kullanılır. Sağ kolonda ayrıca
+  **`KAMERA LİSTESİ`** paneli bulunur: keşfedilen kameralar (güven skoru/
+  kanıt rozetleriyle) ve **KAMERA BUL** / **BOŞALT** düğmeleri.
 - **Alarm Merkezi** — `TEHDİT ALARMLARI` listesi (önem derecesine göre renkli:
   KRİTİK/YÜKSEK/ORTA/DÜŞÜK), tehdit haritası ve izlemeyi başlat/durdur kontrolü.
-- **Araçlar** — üç alt sekme:
+- **Araçlar** — dört alt sekme:
   1. **Paket İzleme** — canlı paket listesi, display filtre kutusu, PDU/hex
      detayı, `.pcap` kaydı.
   2. **Site Karartma** — hangi IP hangi siteye gitti (gözlem listesi), tek
      tıkla kurala çevirme, aktif kurallar, karartmayı aç/kapat.
   3. **Port Tarayıcı** — hedef cihaz seç, tarama tipi/stealth ayarı, açık
      port + servis + sürüm + CVE sonuçları.
+  4. **Kameralar** — kamera hattının ana yüzeyi (solda kamera listesi; sağda
+     seçili kameranın detay paneli). Eylemler: **İZLE** (canlı görüntü),
+     **ANLIK GÖRÜNTÜ**, **KAYIT**, **OTONOM ERİŞ** (varsayılan kimlik +
+     zafiyet yolları), **PARMAK İZİ + ONVIF**, **ZAFİYET SONDASI** ve elle
+     kullanıcı/parola girişi. Dashboard'daki `KAMERA LİSTESİ` ile **aynı**
+     listeyi paylaşır (tek doğruluk kaynağı `gui_camera.c`).
 
 ---
 
@@ -153,8 +206,13 @@ sudo apt install -y libgl1-mesa-dev libgles2-mesa-dev \
 # 5. Raylib
 sudo apt install -y libraylib-dev
 
-# 6. (Opsiyonel) QUIC SNI çözümleme için OpenSSL
+# 6. (Önerilen) QUIC SNI çözümleme + kamera TLS sondası için OpenSSL
 sudo apt install -y libssl-dev
+
+# 7. (Kamera izleme için) ffmpeg/ffprobe
+#    RTSP/MJPEG akışını uygulama-içinde çözmek için kullanılır.
+#    Yoksa keşif/erişim çalışır ama canlı görüntü açılamaz.
+sudo apt install -y ffmpeg
 ```
 
 **Raylib depoda yoksa** kaynak koddan derleyin:
@@ -176,12 +234,15 @@ Kurulumu doğrulayın:
 pkg-config --modversion raylib    # örn. 5.5.0
 pkg-config --modversion libpcap   # örn. 1.10.5
 pkg-config --modversion openssl   # opsiyonel
+ffmpeg -version                   # kamera izleme için (runtime)
 ```
 
-> CMake, `raylib` ve `libpcap` için `pkg-config` kullanır. Yukarıdaki üç
-> `.pc` dosyası bulunabiliyorsa derleme sorunsuz geçer. OpenSSL bulunamazsa
-> `quic_sni.c` derlemeden çıkar (ICMP fallback devreye girer) — derleme
-> yine de başarılı olur.
+> CMake, `raylib` ve `libpcap` için `pkg-config` kullanır. Yukarıdaki
+> `.pc` dosyaları bulunabiliyorsa derleme sorunsuz geçer. OpenSSL bulunamazsa
+> `quic_sni.c` derlemeden çıkar (ICMP fallback devreye girer) + kamera HTTPS
+> sondası devre dışı kalır (Basic/Digest/ONVIF yine çalışır) — derleme yine de
+> başarılı olur. **ffmpeg derleme için gerekmez**; yalnızca canlı izleme/kayıt/
+> snapshot çalışma zamanında çağrılır ve yokluğu arayüzde bildirilir.
 
 ---
 
@@ -200,7 +261,7 @@ Derleme sırasında konsol, OpenSSL bulunup bulunmadığını ve platform
 bilgisini bildirir:
 
 ```
--- OpenSSL bulundu: QUIC SNI cozumleme aktif
+-- OpenSSL bulundu: QUIC SNI cozumleme + kamera TLS sondasi aktif
 -- Platform: Linux
 -- Derleyici: /usr/bin/cc
 ```
@@ -233,6 +294,10 @@ xhost +local:root            # X11 display izni
 sudo ./build/beat_system     # tam özellik setiyle çalıştır
 xhost -local:root            # iş bitince izni geri al
 ```
+
+> Kamera keşfi raw ARP süpürmesi de kullanır; root ile daha eksiksiz sonuç
+> verir. Root olmadan da TCP port/RTSP/HTTP/ONVIF/SSDP/mDNS tabanlı keşif
+> çalışır.
 
 ### 6.3 Headless mod (GUI'siz IDS)
 
@@ -275,7 +340,105 @@ aktif izleyici sayısı.
 
 ---
 
-## 7. Neden root gerekiyor?
+## 7. Kamera Modülü (Keşif → Erişim → İzleme)
+
+Kamera hattı dört motordan oluşur ve tamamı arayüzden sürülür. Hiçbiri İzleme
+Listesi'ne bağlı değildir.
+
+### 7.1 Keşif — `camera_discovery`
+
+Kamerayı tek bir sinyalle değil, **çoklu kanıt** ile doğrular; her kamera için
+kanıt bit maskesi ve 0-100 güven skoru üretir (`CAM_EV_PORT`, `CAM_EV_RTSP`,
+`CAM_EV_RTSP_AUTH`, `CAM_EV_HTTP`, `CAM_EV_ONVIF`, `CAM_EV_OUI`, `CAM_EV_VPORT`).
+
+| Yöntem | Detay |
+|---|---|
+| Kamera-imzalı port taraması | `554, 8554, 8555, 80, 8080, 81, 88, 8000, 8081, 37777, 34567, 8899, 9000, 443, 1024, 5000` gibi geniş set; üretici portları (37777/34567/8899/8000) ayrıca işaretlenir |
+| RTSP sondası | `OPTIONS` / `DESCRIBE`; `Server` başlığı ve `401 realm` çıkarımı |
+| HTTP web arayüzü | `Server` başlığı + kamera imza kelimeleri |
+| ONVIF WS-Discovery | UDP `239.255.255.250:3702` multicast `Probe` |
+| SSDP/UPnP | UDP `239.255.255.250:1900` `ssdp:all` M-SEARCH |
+| mDNS/Bonjour | UDP `224.0.0.251:5353` |
+| MAC OUI | Bilinen kamera üreticisi veritabanı |
+| DNS yanıt toplama | Ek host keşfi (self/gateway hariç) |
+
+**Kendi ağın dışlanır:** keşif başlamadan `gather_self_info()`, makinenin tüm
+yerel IP'lerini, gateway'i, ağ/broadcast adresini toplar. `is_excluded_host()`
+şu adresleri **hiçbir** host-koleksiyon noktasında (ARP taraması, SSDP/mDNS,
+DNS yanıtları, port sondası) listeye almaz:
+
+- Makinenin kendi IP'leri (`is_self_ip`)
+- Ağ geçidi (gateway) IP'si
+- Ağ adresi (`.0`) ve broadcast (`.255`)
+- Multicast ve link-local (169.254.x.x) adresler
+
+Böylece "kameralar" listesinde **kendi local makinen ve gateway** görünmez;
+onlar yalnızca bağlam bilgisi olarak kullanılır. Tarama aşamaları ilerlemeyi
+(`progress`, `phase`, `scanned/total/responded hosts`) canlı raporlar; tek
+tarama üst sınırı `CAM_MAX_HOSTS=1024`, işçi sayısı `CAM_MAX_WORKERS=32`.
+
+Arayüzden **KAMERA BUL** ile başlatılır; tarama arka planda (`start_async`)
+çalışır ve iptal edilebilir.
+
+### 7.2 Parmak izi & zafiyet sondaları — `camera_vuln`
+
+| Yetenek | Açıklama |
+|---|---|
+| HTTP parmak izi | Üreticiye özel device-info endpoint'lerinden model / firmware / seril numarası |
+| Hikvision | ISAPI `auth-token` bilgi sızıntısı + kullanıcı listesi sızıntısı |
+| Dahua | RPC2 kimlik atlatma denemesi |
+| Xiongmai | Varsayılan arka kapı hesabı + anonim device-info |
+| ONVIF istemcisi | `GetDeviceInformation` / `GetProfiles` / `GetStreamUri`; kimlik `WS-UsernameToken` (PasswordDigest, HMAC-SHA1) + HTTP Basic + HTTP Digest fallback; kimliksiz de denenir |
+| Kimlik veritabanı | Geniş varsayılan tablo + `kullanici:parola` biçiminde harici wordlist yükleyici |
+
+Sonda sonuçları `CAM_VULN_*` bayrakları olarak kaydedilir ve arayüzde gösterilir.
+
+### 7.3 Otonom erişim — `camera_access`
+
+1. RTSP yol keşfi (sık kullanılan akış yolları, hızlı `DESCRIBE`).
+2. Kimliksiz açık akış denemesi.
+3. Varsayılan kimlik listesi (~96 aday; `admin/admin`, `admin/12345`, …).
+4. Elle girilen kullanıcı/parola.
+
+Başarıda kameranın çalışan akış URL'si (gerekirse `user:pass` gömülü)
+`found_url`'e yazılır; arayüz bunu `video_stream` ile açıp grid'de gösterir.
+Tüm ağ işlemleri **tek arka plan işçi thread'inde** yürür — GUI bloke olmaz.
+
+### 7.4 Uygulama-içi izleme — `video_stream`
+
+Kameralar **harici bir oynatıcıda/browser'da değil, doğrudan BEAT penceresi
+içinde** çizilir (meterpreter tarzı tek pencere).
+
+- Her akış için görünmez bir `ffmpeg` alt-süreci + okuyucu thread.
+- Texture oluşturma/güncelleme yalnızca ana (render) thread'de.
+- Düşük gecikme: `nobuffer/low_delay`, sabit decode çözünürlüğü, fps sınırı.
+- Çoklu akış (8 slota kadar), anlık kare (snapshot), kayıt (`-c copy`, yeniden
+  kodlama yok, isteğe bağlı segmentlere bölme), kopunca **otomatik yeniden
+  bağlanma**.
+- Decode: yazılım / VAAPI (Intel-AMD) / NVDEC (NVIDIA).
+
+### 7.5 Kamera modülünü test etme (testbed)
+
+Gerçek kamera olmadan modülü uçtan uca denemek için `testbed/` altında
+`mediamtx` tabanlı bir yazılım testbedi vardır (4 açık RTSP + 1 korumalı RTSP +
+1 MJPEG sahte kamera; H.264/H.265/MJPEG):
+
+```bash
+cd testbed
+./start.sh     # başlat + ffprobe ile doğrula
+./stop.sh      # hepsini kapat
+```
+
+> **Testbed gereksinimleri (yalnızca testbed için, ana derleme için değil):**
+> `docker` (host-network erişimi ile) + `python3` + `ffmpeg`/`ffprobe`. İlk
+> çalıştırmada `bluenviron/mediamtx:latest` imajı otomatik çekilir. Üretim
+> kullanımında testbed gerekmez.
+
+Ayrıntılı kamera haritası ve hesaplar için `testbed/README.md`'ye bakın.
+
+---
+
+## 8. Neden root gerekiyor?
 
 | Yetenek | Gerekçe |
 |---|---|
@@ -284,6 +447,7 @@ aktif izleyici sayısı.
 | ARP black-hole | Ham ARP çerçevesi enjeksiyonu |
 | Site karartma | Ham enjeksiyon + `iptables` (`BEAT_SB` zinciri) yönetimi |
 | QUIC ICMP fallback | Ham `AF_INET` soketi ile ICMP üretimi |
+| Kamera ARP keşfi | Ham ARP süpürmesi (root olmadan `/proc/net/arp` / `ip neigh` fallback) |
 
 Root olmadan uygulama "kısıtlı mod"da çalışır: TCP connect taraması, pasif
 procfs gözlemi ve GUI kullanılabilir; ham soket gerektiren müdahaleler devre
@@ -291,7 +455,7 @@ dışı kalır ve motorlar bunu arayüzde rozet/uyarı olarak bildirir.
 
 ---
 
-## 8. Proje Yapısı
+## 9. Proje Yapısı
 
 ```
 BEAT-System/
@@ -309,6 +473,12 @@ BEAT-System/
 │   ├── raw_inject.h            # Ham Ethernet/IP/UDP/TCP kare enjeksiyonu
 │   ├── quic_sni.h              # QUIC Initial → TLS SNI çıkarımı
 │   ├── site_block.h            # Site karartma motoru (sinkhole/RST/iptables)
+│   ├── cam_net.h               # Kamera için TCP/TLS + HTTP istemci + MD5/SHA1/HMAC/base64 + Digest
+│   ├── camera_discovery.h      # Kamera keşif motoru (port/RTSP/HTTP/ONVIF/OUI + kanıt/güven skoru)
+│   ├── camera_access.h         # Otonom erişim motoru (yol keşfi, kimlik denemesi, snapshot)
+│   ├── camera_vuln.h           # Parmak izi + zafiyet sondaları + ONVIF istemcisi + kimlik DB
+│   ├── video_stream.h          # Uygulama-içi RTSP/MJPEG izleme (ffmpeg → raylib texture)
+│   ├── gui_camera.h            # Kamera GUI modülü arayüzü (Dashboard paneli + Araçlar sekmesi)
 │   └── gui.h                   # GUI modülü arayüzü ve tema paleti
 ├── lib/
 │   └── raygui.h                # Raygui (header-only)
@@ -325,7 +495,20 @@ BEAT-System/
 │   ├── raw_inject.c            # Ham kare kurucu/gönderici + checksum
 │   ├── quic_sni.c              # QUIC SNI çözücü (OpenSSL)
 │   ├── site_block.c            # Site karartma + iptables katmanı
+│   ├── cam_net.c               # Kamera ağ/kripto altyapısı (saf-C MD5/SHA1/HMAC, HTTP, Digest)
+│   ├── camera_discovery.c      # Kamera keşfi: ARP+port+RTSP+HTTP+ONVIF+SSDP/mDNS+OUI, self/gateway dışlama
+│   ├── camera_access.c         # Otonom erişim: yol keşfi, varsayılan/elle kimlik, arka plan işçi
+│   ├── camera_vuln.c           # Parmak izi, Hikvision/Dahua/Xiongmai sondaları, ONVIF, wordlist
+│   ├── video_stream.c          # Görünmez ffmpeg alt-süreci → RGB kare → Texture2D; kayıt/reconnect
+│   ├── gui_camera.c            # Kamera GUI modülü (Dashboard paneli + Araçlar▸Kameralar)
 │   └── gui.c                   # Raylib/Raygui arayüz (3 sekme)
+├── testbed/                    # Kamera modülü yazılım testbedi (mediamtx + MJPEG)
+│   ├── start.sh / stop.sh      # Testbed başlat/durdur (ffprobe ile doğrulama)
+│   ├── mediamtx-open.yml       # Açık RTSP sunucusu yapılandırması
+│   ├── mediamtx-auth.yml       # Korumalı RTSP sunucusu (kimlik testi)
+│   ├── mjpeg_server.py         # MJPEG-over-HTTP sahte kamera
+│   ├── test_camera_discovery.c # Keşif motoru bağımsız testi
+│   └── README.md               # Testbed kamera haritası ve kullanımı
 └── assets/fonts/               # GUI yazı tipleri
 ```
 
@@ -333,7 +516,7 @@ BEAT-System/
 
 ---
 
-## 9. Notlar ve Bilinen Sınırlar
+## 10. Notlar ve Bilinen Sınırlar
 
 - **Doğrulama:** IDS kural motoru, akış tablosu ve site karartma yolları
   geliştirme sırasında kural/paket düzeyinde test edilmiştir; gerçek trafikte
@@ -343,10 +526,20 @@ BEAT-System/
 - **ARP black-hole MITM değildir:** trafik yönlendirilmez, yalnızca hedefin
   ARP tablosu zehirlenir; kaldırma işlemi doğru ARP Reply'ları ile anında
   geri alınır (ARP zaten 30–60 sn içinde kendiliğinden düzelir).
+- **Kamera hattı — sahada uçtan uca test:** keşif/erişim/izleme kod yolu
+  derlenmiş ve GUI render'ı doğrulanmıştır; ancak gerçek kamera karşısında
+  uçtan uca (bul → auth → stream) doğrulama için `testbed/` kullanılmalıdır.
+  Farklı marka/firmware'lerde başarı; kameranın sertleştirme durumuna, kimlik
+  politikasına ve ağ segmentasyonuna bağlıdır.
+- **TLS sondası:** HTTPS/ONVIF-over-TLS denemeleri yalnızca OpenSSL derlemede
+  tanımlıysa çalışır; aksi halde HTTPS adımı atlanır (Basic/Digest/RTSP yine
+  denenir).
+- **ffmpeg bağımlılığı:** canlı izleme, snapshot ve kayıt çalışma zamanında
+  `ffmpeg`'e bağlıdır; binary yoksa keşif/erişim çalışır ama görüntü açılamaz.
 
 ---
 
-## 10. Yasal Uyarı
+## 11. Yasal Uyarı
 
 Bu araç **yalnızca eğitim ve yetkili güvenlik testleri** amacıyla
 geliştirilmiştir. Sahip olmadığınız veya test etme izniniz bulunmayan ağ ve

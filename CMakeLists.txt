@@ -20,10 +20,16 @@ set(SOURCES
     src/arp_block.c
     src/port_scanner.c
     src/gui.c
+    src/gui_camera.c
     src/filter_engine.c
     src/raw_inject.c
     src/quic_sni.c
     src/site_block.c
+    src/camera_discovery.c
+    src/camera_access.c
+    src/video_stream.c
+    src/cam_net.c
+    src/camera_vuln.c
 )
 
 # Hedef
@@ -42,10 +48,10 @@ target_compile_definitions(beat_system PRIVATE _GNU_SOURCE)
 find_package(OpenSSL)
 if(OpenSSL_FOUND)
     target_compile_definitions(beat_system PRIVATE HAVE_OPENSSL)
-    target_link_libraries(beat_system PRIVATE OpenSSL::Crypto)
-    message(STATUS "OpenSSL bulundu: QUIC SNI cozumleme aktif")
+    target_link_libraries(beat_system PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+    message(STATUS "OpenSSL bulundu: QUIC SNI cozumleme + kamera TLS sondasi aktif")
 else()
-    message(STATUS "OpenSSL yok: QUIC SNI cozulemez, ICMP fallback kullanilir")
+    message(STATUS "OpenSSL yok: QUIC SNI + kamera HTTPS sondasi devre disi (Basic/Digest yine calisir)")
 endif()
 
 # Derleme bayraklari

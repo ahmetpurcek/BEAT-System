@@ -417,25 +417,6 @@ içinde** çizilir (meterpreter tarzı tek pencere).
   bağlanma**.
 - Decode: yazılım / VAAPI (Intel-AMD) / NVDEC (NVIDIA).
 
-### 7.5 Kamera modülünü test etme (testbed)
-
-Gerçek kamera olmadan modülü uçtan uca denemek için `testbed/` altında
-`mediamtx` tabanlı bir yazılım testbedi vardır (4 açık RTSP + 1 korumalı RTSP +
-1 MJPEG sahte kamera; H.264/H.265/MJPEG):
-
-```bash
-cd testbed
-./start.sh     # başlat + ffprobe ile doğrula
-./stop.sh      # hepsini kapat
-```
-
-> **Testbed gereksinimleri (yalnızca testbed için, ana derleme için değil):**
-> `docker` (host-network erişimi ile) + `python3` + `ffmpeg`/`ffprobe`. İlk
-> çalıştırmada `bluenviron/mediamtx:latest` imajı otomatik çekilir. Üretim
-> kullanımında testbed gerekmez.
-
-Ayrıntılı kamera haritası ve hesaplar için `testbed/README.md`'ye bakın.
-
 ---
 
 ## 8. Neden root gerekiyor?

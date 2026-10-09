@@ -31,9 +31,6 @@ int  cam_conn_write(CamConn *c, const void *buf, int len, int timeout_ms);
 int  cam_conn_read(CamConn *c, void *buf, int len, int timeout_ms);
 void cam_conn_close(CamConn *c);
 
-/* TLS bu derlemede kullanilabilir mi? */
-int  cam_net_tls_available(void);
-
 /* ================= Kripto (saf C) ================= */
 void cam_b64_encode(const unsigned char *in, int len, char *out, int outlen);
 
@@ -43,9 +40,6 @@ void cam_md5_hex(const void *in, size_t len, char out[33]);
 void cam_sha1(const unsigned char *in, size_t len, unsigned char out[20]);
 /* SHA1 -> base64 (ONVIF PasswordDigest icin). */
 void cam_sha1_b64(const void *in, size_t len, char *out, int outlen);
-/* HMAC-SHA1 -> base64 (ONVIF UsernameToken imzasi icin). */
-void cam_hmac_sha1_b64(const void *key, size_t keylen,
-                       const void *data, size_t datalen, char *out, int outlen);
 
 /* Rastgele nonce uret (hex yaz). */
 void cam_make_nonce(char *out, int outlen);
@@ -70,16 +64,6 @@ int cam_http_request(const char *ip, int port, int tls,
                      const char *method, const char *path,
                      const char *host_header, const char *extra_headers,
                      int timeout_ms, char *body, int bodylen, CamHttpResp *resp);
-
-/*
- * Kimlik dogrulamali GET: once kimliksiz dener; 401 gelirse WWW-Authenticate'e
- * gore Basic veya Digest ile tekrar dener (iki adim).
- * user NULL/"" ise yalniz kimliksiz denenir.
- * Doner: 0 = 200/2xx alindi, 1 = 401 (kimlik tutmadi), 2 = diger, <0 hata.
- */
-int cam_http_get_auth(const char *ip, int port, int tls, const char *path,
-                      const char *user, const char *pass,
-                      int timeout_ms, char *body, int bodylen, CamHttpResp *resp);
 
 /* RFC 2617 Digest Authorization basligi uretir. auth_extra icine
  * "Authorization: Digest ...\r\n" yazilir. */

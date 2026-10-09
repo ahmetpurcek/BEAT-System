@@ -20,7 +20,6 @@ set(SOURCES
     src/arp_block.c
     src/port_scanner.c
     src/gui.c
-    src/gui_camera.c
     src/filter_engine.c
     src/raw_inject.c
     src/quic_sni.c

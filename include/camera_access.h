@@ -85,17 +85,11 @@ int  camera_access_start(const char *ip, int port, const char *base_url,
 int  camera_access_try_credentials(const char *ip, const char *user,
                                    const char *pass);
 
-/* Isi iptal et (sonucu temizlemez). */
-void camera_access_cancel(const char *ip);
-
 /* Isin anlik kopyasini alir. Doner: 1 = kayit var, 0 = yok. */
 int  camera_access_get(const char *ip, CameraAccessJob *out);
 
 /* Is kuyrukta/calisiyor mu? */
 int  camera_access_busy(const char *ip);
-
-/* Listeyi temizle (shutdown disinda nadiren gerekir). */
-void camera_access_reset(void);
 
 /* Kesiften ek HTTP baglami ekler (bypass/ONVIF/snapshot icin). Additive;
  * camera_access_start'tan once ya da sonra cagrilabilir. */

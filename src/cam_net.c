@@ -39,13 +39,6 @@ static void cam_tls_init_once(void) {
 }
 #endif
 
-int cam_net_tls_available(void) {
-#ifdef HAVE_OPENSSL
-    return 1;
-#else
-    return 0;
-#endif
-}
 
 static int cam_tcp_connect(const char *ip, int port, int timeout_ms) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -335,32 +328,6 @@ void cam_sha1_b64(const void *in, size_t len, char *out, int outlen) {
     cam_b64_encode(d, 20, out, outlen);
 }
 
-void cam_hmac_sha1_b64(const void *key, size_t keylen,
-                       const void *data, size_t datalen, char *out, int outlen) {
-    unsigned char k[64];
-    memset(k, 0, 64);
-    if (keylen > 64) cam_sha1((const unsigned char *)key, keylen, k);
-    else memcpy(k, key, keylen);
-
-    unsigned char ipad[64], opad[64];
-    for (int i = 0; i < 64; i++) { ipad[i] = k[i] ^ 0x36; opad[i] = k[i] ^ 0x5c; }
-
-    unsigned char *inner = (unsigned char *)malloc(64 + datalen);
-    if (!inner) { out[0] = '\0'; return; }
-    memcpy(inner, ipad, 64);
-    memcpy(inner + 64, data, datalen);
-    unsigned char ih[20];
-    cam_sha1(inner, 64 + datalen, ih);
-    free(inner);
-
-    unsigned char outer[84];
-    memcpy(outer, opad, 64);
-    memcpy(outer + 64, ih, 20);
-    unsigned char oh[20];
-    cam_sha1(outer, 84, oh);
-
-    cam_b64_encode(oh, 20, out, outlen);
-}
 
 void cam_make_nonce(char *out, int outlen) {
     unsigned char rnd[16];
@@ -608,31 +575,3 @@ void cam_http_digest_header(const char *user, const char *pass,
     }
 }
 
-int cam_http_get_auth(const char *ip, int port, int tls, const char *path,
-                      const char *user, const char *pass,
-                      int timeout_ms, char *body, int bodylen, CamHttpResp *resp) {
-    CamHttpResp r;
-    int rc = cam_http_request(ip, port, tls, "GET", path, NULL, NULL,
-                              timeout_ms, body, bodylen, &r);
-    if (resp) *resp = r;
-    if (rc != 0) return -1;
-    if (r.status != 401) return (r.status >= 200 && r.status < 300) ? 0 : 2;
-    if (!user || !user[0]) return 1;   /* kimlik yok */
-
-    char auth[768];
-    if (cam_wwwauth_is_digest(r.www_auth)) {
-        cam_http_digest_header(user, pass, r.www_auth, "GET", path, auth, sizeof(auth));
-    } else {
-        char raw[160], b64[256];
-        snprintf(raw, sizeof(raw), "%s:%s", user, pass ? pass : "");
-        cam_b64_encode((const unsigned char *)raw, (int)strlen(raw), b64, sizeof(b64));
-        snprintf(auth, sizeof(auth), "Authorization: Basic %s\r\n", b64);
-    }
-    CamHttpResp r2;
-    rc = cam_http_request(ip, port, tls, "GET", path, NULL, auth,
-                          timeout_ms, body, bodylen, &r2);
-    if (resp) *resp = r2;
-    if (rc != 0) return -1;
-    if (r2.status == 401) return 1;
-    return (r2.status >= 200 && r2.status < 300) ? 0 : 2;
-}

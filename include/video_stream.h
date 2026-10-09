@@ -70,8 +70,6 @@ void video_stream_close(int slot);
 
 /* Slot durumu / bilgisi. */
 int  video_stream_state(int slot);
-int  video_stream_is_active(int slot);
-void video_stream_get_info(int slot, VideoStreamInfo *out);
 
 /* Ana (render) thread: yeni kare varsa Texture2D'yi gunceller.
  * Doner: 1 = bu cagrida yeni kare yuklendi, 0 = degisiklik yok. */
@@ -79,9 +77,6 @@ int  video_stream_poll(int slot);
 
 /* Ana (render) thread: cizime hazir texture. Hazir degilse id==0. */
 Texture2D video_stream_texture(int slot);
-
-/* Disaridan hata mesaji koy (access engine tarafindan). */
-void video_stream_set_status(int slot, const char *fmt, ...);
 
 /* ffmpeg mevcut mu (bir kez). */
 int  video_stream_ffmpeg_available(void);
@@ -99,6 +94,5 @@ int  video_stream_recording(int slot);
 
 /* Akis kopunca otomatik yeniden baglanmayi ac/kapat (varsayilan: acik). */
 void video_stream_set_reconnect(int slot, int enable);
-int  video_stream_reconnect_enabled(int slot);
 
 #endif /* VIDEO_STREAM_H */

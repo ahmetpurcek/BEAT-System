@@ -586,29 +586,7 @@ int video_stream_state(int slot) {
     if (slot < 0 || slot >= VS_MAX_STREAMS) return VS_ST_IDLE;
     return g_vs[slot].state;
 }
-int video_stream_is_active(int slot) {
-    if (slot < 0 || slot >= VS_MAX_STREAMS) return 0;
-    return g_vs[slot].used;
-}
 
-void video_stream_get_info(int slot, VideoStreamInfo *out) {
-    if (!out) return;
-    memset(out, 0, sizeof(*out));
-    if (slot < 0 || slot >= VS_MAX_STREAMS) return;
-    VideoStream *vs = &g_vs[slot];
-    platform_mutex_lock(&vs->lock);
-    out->slot = slot;
-    out->state = vs->state;
-    out->decode_mode = vs->decode_mode;
-    out->width = vs->w;
-    out->height = vs->h;
-    out->fps = vs->fps;
-    out->frames = vs->frames;
-    out->last_frame_time = vs->last_frame_time;
-    strncpy(out->url, vs->url, VS_URL_LEN - 1);
-    strncpy(out->status, vs->status, VS_STATUS_LEN - 1);
-    platform_mutex_unlock(&vs->lock);
-}
 
 int video_stream_poll(int slot) {
     if (slot < 0 || slot >= VS_MAX_STREAMS) return 0;
@@ -651,16 +629,6 @@ Texture2D video_stream_texture(int slot) {
     return vs->tex;
 }
 
-void video_stream_set_status(int slot, const char *fmt, ...) {
-    if (slot < 0 || slot >= VS_MAX_STREAMS) return;
-    VideoStream *vs = &g_vs[slot];
-    va_list ap;
-    va_start(ap, fmt);
-    platform_mutex_lock(&vs->lock);
-    vsnprintf(vs->status, sizeof(vs->status), fmt, ap);
-    platform_mutex_unlock(&vs->lock);
-    va_end(ap);
-}
 
 int video_stream_snapshot(int slot, const char *path) {
     if (slot < 0 || slot >= VS_MAX_STREAMS || !path || !path[0]) return -1;
@@ -771,7 +739,3 @@ void video_stream_set_reconnect(int slot, int enable) {
     g_vs[slot].auto_reconnect = enable ? 1 : 0;
 }
 
-int video_stream_reconnect_enabled(int slot) {
-    if (slot < 0 || slot >= VS_MAX_STREAMS) return 0;
-    return g_vs[slot].auto_reconnect;
-}

@@ -28,11 +28,37 @@ enum {
 typedef struct { const char *user; const char *pass; } CamCred;
 /* Genis varsayilan kimlik tablosu (NULL ile sonlanir). */
 const CamCred *camera_vuln_default_creds(int *count);
-/* Harici wordlist: satirlar "kullanici:parola" veya sadece "parola" (admin varsayilir).
- * out: malloc edilmis CamCred dizisi; doner: yuklenen sayi (0 hata). */
-int camera_vuln_load_wordlist(const char *path, CamCred **out, int max_lines);
-void camera_vuln_free_wordlist(CamCred *list);
 
+/* Kombinasyon saldirisi icin ayri kullanici ve parola aday listeleri
+ * (NULL ile sonlanir). Kullanici x parola capraz carpimi uretilir. */
+const char *const *camera_vuln_usernames(int *count);
+const char *const *camera_vuln_passwords(int *count);
+
+/* Harici wordlist yukleyici. Dosya satirlari "kullanici:parola"
+ * (iki nokta yoksa yalniz parola; bos/# ile baslayan satirlar atlanir).
+ * Yuklenen kayitlar internal tabloya eklenir ve kombinasyon/tam-liste
+ * dongusunde kullanilir. Doner: eklenen kayit sayisi (>=0), hata: -1. */
+int camera_vuln_load_wordlist(const char *path);
+/* Yuklenen toplam harici kayit sayisi. */
+int camera_vuln_wordlist_count(void);
+/* Harici wordlist kayitlarini dondurur (NULL ile sonlanmaz; count ile). */
+const CamCred *camera_vuln_wordlist_creds(int *count);
+
+/* --- HTTP kimlik dogrulama (web UI) --- */
+/* Bir kullanici/parola ciftini HTTP uzerinden dener:
+ *   - bilinen kamera web giris endpoint'leri (Foscam CGI, Reolink API,
+ *     Dahua CGI, Hikvision ISAPI, Hanwha, jenerik login.cgi)
+ *   - kimlik basariliysa donen session/token + varsa cekilen kare
+ * Basari kaniti: oturum cerezi/token veya indirilen JPEG/PNG kare.
+ * Doner: 1 = kimlik gecerli, 0 = gecersiz, -1 = endpoint yok/ulasilamadi.
+ * session_out'a (verilirse) alinan token/cerez, image_out'a (verilirse)
+ * cekilen kare dosyasi yolu yazilir; detail insan-okur aciklama alir. */
+int camera_vuln_http_auth(const char *ip, int port, int tls,
+                          const char *vendor_hint,
+                          const char *user, const char *pass,
+                          char *session_out, int slen,
+                          char *image_out, int imlen,
+                          char *detail, int dlen);
 /* --- HTTP parmak izi --- */
 /* Ureticiye ozel device-info endpoint'lerini dener; vendor/model/firmware doldurur.
  * Doner: eslesen endpoint sayisi (0 = bulunamadi). */

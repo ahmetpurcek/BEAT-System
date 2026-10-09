@@ -19,13 +19,18 @@
 #include "site_block.h"
 #include "raylib.h"
 #include "utils.h"
-#include "gui_camera.h"
+#include "camera_discovery.h"
+#include "camera_access.h"
+#include "camera_vuln.h"
+#include "video_stream.h"
 
 #define RAYGUI_IMPLEMENTATION
 #include "../lib/raygui.h"
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 
 /* ========== State (v2 ile birebir) ========== */
 static GuiTab g_active_tab = TAB_DASHBOARD;
@@ -408,6 +413,514 @@ static void capture_start_for(const char *ip);
 static void draw_right_panel_logs(int rx, int ry, int rw, int rh);
 static void draw_right_panel_device(int rx, int ry, int rw, int rh);
 static void draw_mon_list_panel(int rx, int ry, int rw, int rh);
+
+/* ========== Kamera modülü (gui_camera.c'den entegre) ========== */
+#define GC_MAX        128
+#define GC_ROW_H      26
+#define GC_SNAP_DIR   "snapshots"
+
+typedef enum {
+  GC_DISCOVERED = 0,
+  GC_TRYING,
+  GC_OPEN,
+  GC_CREDS,
+  GC_ACCESSED,
+  GC_STREAMING,
+  GC_FAILED
+} GcState;
+
+typedef struct {
+  char     ip[MAX_IP_LEN];
+  char     mac[MAX_MAC_LEN];
+  char     vendor[64];
+  char     model[64];
+  int      rtsp_port;
+  int      http_port;
+  int      auth_required;
+  char     realm[CAM_REALM_LEN];
+  char     base_url[CAM_URL_LEN];
+  GcState  state;
+  int      stream_slot;
+  int      recording;
+  char     found_url[CAM_URL_LEN];
+  char     found_user[64];
+  char     found_pass[64];
+  int      onvif_used;
+  int      tried, total;
+  unsigned vuln_mask;
+  char     note[CA_ERR_LEN];
+  char     info[192];
+} GcEntry;
+
+static GcEntry g_cam[GC_MAX];
+static int     g_cam_n = 0;
+static char    g_cam_sel[MAX_IP_LEN] = {0};
+static float   g_cam_scroll_list   = 0.0f;
+static float   g_cam_scroll_detail = 0.0f;
+static char    g_cam_msg[192]   = {0};
+static char    g_cam_muser[64]  = {0};
+static char    g_cam_mpass[64]  = {0};
+static int     g_cam_muser_edit = 0;
+static int     g_cam_mpass_edit = 0;
+static double  g_cam_last_sync  = 0.0;
+static int     g_cam_ready      = 0;
+static int     g_cam_scan_running = 0;
+static char    g_cam_target[64] = {0};
+static int     g_cam_target_edit = 0;
+
+static const char *gc_state_text(GcState s) {
+  switch (s) {
+  case GC_DISCOVERED: return "keşfedildi";
+  case GC_TRYING:     return "deneniyor";
+  case GC_OPEN:       return "açık akış";
+  case GC_CREDS:      return "parola bulundu";
+  case GC_ACCESSED:   return "erişildi";
+  case GC_STREAMING:  return "izleniyor";
+  case GC_FAILED:     return "erişilemedi";
+  default:            return "?";
+  }
+}
+static Color gc_state_color(GcState s) {
+  switch (s) {
+  case GC_DISCOVERED: return COLOR_TEXT_DIM;
+  case GC_TRYING:     return COLOR_AMBER;
+  case GC_OPEN:       return COLOR_RED;
+  case GC_CREDS:      return COLOR_YELLOW;
+  case GC_ACCESSED:   return COLOR_ACCENT;
+  case GC_STREAMING:  return COLOR_GREEN;
+  case GC_FAILED:     return COLOR_RED;
+  default:            return COLOR_TEXT_SEC;
+  }
+}
+
+/* Kamera modülü için metin genişliği (özel font ile) */
+static int gc_text_w(const char *t, int size) {
+  if (!t || !t[0]) return 0;
+  if (g_custom_font.texture.id > 0)
+    return (int)MeasureTextEx(g_custom_font, t, (float)size, 1.0f).x;
+  return MeasureText(t, size);
+}
+
+/* Kamera buton yardımcısı: cam_btn eşdeğeri, gui.c stili */
+static int draw_cam_btn(Rectangle r, const char *label, Color accent, int enabled) {
+  Vector2 mp = GetMousePosition();
+  int hov = enabled && CheckCollisionPointRec(mp, r);
+  DrawRectangleRounded(r, 0.28f, 4,
+                       enabled ? ui_alpha(accent, hov ? 64 : 26)
+                               : (Color){30, 36, 50, 170});
+  DrawRectangleRoundedLinesEx(r, 0.28f, 4, 1.0f,
+                              enabled ? ui_alpha(accent, hov ? 220 : 150)
+                                      : (Color){60, 70, 90, 110});
+  int tw = gc_text_w(label, 10);
+  int inner = (int)r.width - 8;
+  /* Etiket sığmıyorsa kıs */
+  if (tw > inner) tw = inner;
+  Color tc = enabled ? (hov ? COLOR_TEXT : COLOR_TEXT_SEC) : COLOR_TEXT_DIM;
+  DrawTextC(label, (int)(r.x + (r.width - gc_text_w(label, 10)) * 0.5f),
+            (int)(r.y + r.height * 0.5f - 6), 10, tc);
+  return enabled && hov && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+}
+
+/* Kamera liste yönetim yardımcıları */
+static int  gc_find(const char *ip) {
+  for (int i = 0; i < g_cam_n; i++)
+    if (strcmp(g_cam[i].ip, ip) == 0) return i;
+  return -1;
+}
+static void gc_close_stream(GcEntry *e) {
+  if (e->stream_slot >= 0) {
+    if (video_stream_recording(e->stream_slot))
+      video_stream_record_stop(e->stream_slot);
+    video_stream_close(e->stream_slot);
+    e->stream_slot = -1;
+    e->recording = 0;
+  }
+}
+static int gc_add(const char *ip) {
+  if (g_cam_n >= GC_MAX) return -1;
+  if (gc_find(ip) >= 0) return gc_find(ip);
+  GcEntry *e = &g_cam[g_cam_n];
+  memset(e, 0, sizeof(*e));
+  snprintf(e->ip, sizeof(e->ip), "%s", ip);
+  e->state = GC_DISCOVERED;
+  e->stream_slot = -1;
+  snprintf(e->base_url, sizeof(e->base_url), "rtsp://%s:554/", ip);
+  return g_cam_n++;
+}
+static void gc_remove(int idx) {
+  if (idx < 0 || idx >= g_cam_n) return;
+  gc_close_stream(&g_cam[idx]);
+  for (int i = idx; i < g_cam_n - 1; i++) g_cam[i] = g_cam[i + 1];
+  g_cam_n--;
+}
+static void gc_clear_all(void) {
+  for (int i = 0; i < g_cam_n; i++) gc_close_stream(&g_cam[i]);
+  g_cam_n = 0;
+  g_cam_sel[0] = '\0';
+  g_cam_scroll_list = 0;
+}
+static void gc_merge_discovery(void) {
+  CameraScanResults res;
+  memset(&res, 0, sizeof(res));
+  camera_discovery_get_results(&res);
+  g_cam_scan_running = res.is_scanning;
+  if (res.count <= 0) return;
+  for (int i = 0; i < res.count; i++) {
+    CameraDevice *c = &res.cameras[i];
+    if (!c->ip[0]) continue;
+    int idx = gc_find(c->ip);
+    if (idx < 0) idx = gc_add(c->ip);
+    if (idx < 0) continue;
+    GcEntry *e = &g_cam[idx];
+    if (c->mac[0] && !e->mac[0]) snprintf(e->mac, sizeof(e->mac), "%s", c->mac);
+    if (c->vendor[0]) snprintf(e->vendor, sizeof(e->vendor), "%s", c->vendor);
+    if (c->manufacturer[0] && !e->model[0])
+      snprintf(e->model, sizeof(e->model), "%.63s", c->manufacturer);
+    else if (c->model[0])
+      snprintf(e->model, sizeof(e->model), "%.63s", c->model);
+    e->rtsp_port = c->rtsp_port > 0 ? c->rtsp_port : (c->ports[0] ? 554 : 0);
+    if (e->rtsp_port == 0) e->rtsp_port = 554;
+    e->http_port = c->http_port;
+    e->auth_required = c->rtsp_auth_required;
+    if (c->rtsp_realm[0]) snprintf(e->realm, sizeof(e->realm), "%s", c->rtsp_realm);
+    e->onvif_used = c->has_onvif;
+    if (e->state == GC_DISCOVERED && c->mac[0] && !e->note[0])
+      snprintf(e->note, sizeof(e->note), "güven: %d%%", c->confidence);
+    char base[CAM_URL_LEN];
+    camera_discovery_rtsp_url(c, base, sizeof(base));
+    if (base[0]) snprintf(e->base_url, sizeof(e->base_url), "%s", base);
+  }
+}
+
+/* Kamera aksiyon fonksiyonları */
+static void gc_do_scan(void) {
+  if (camera_discovery_is_scanning()) { camera_discovery_cancel(); return; }
+  if (g_cam_target[0])
+    snprintf(g_cam_msg, sizeof(g_cam_msg), "Kamera keşfi başlatıldı: %s", g_cam_target);
+  else
+    snprintf(g_cam_msg, sizeof(g_cam_msg), "Kamera keşfi başlatıldı (yerel ağ)...");
+  camera_discovery_start_async(g_cam_target[0] ? g_cam_target : NULL);
+  g_cam_scan_running = 1;
+}
+static void gc_do_access(GcEntry *e) {
+  camera_access_set_context(e->ip, e->http_port, e->vendor);
+  int port = e->rtsp_port > 0 ? e->rtsp_port : 554;
+  if (camera_access_start(e->ip, port, e->base_url, e->auth_required, e->realm) == 0) {
+    e->state = GC_TRYING;
+    snprintf(e->note, sizeof(e->note), "otonom erişim başlatıldı...");
+    snprintf(g_cam_msg, sizeof(g_cam_msg), "%s için erişim denemesi başlatıldı.", e->ip);
+  } else {
+    snprintf(e->note, sizeof(e->note), "erişim kuyruğa alınamadı");
+  }
+}
+static void gc_do_manual(GcEntry *e) {
+  if (!g_cam_muser[0] && !g_cam_mpass[0]) {
+    snprintf(g_cam_msg, sizeof(g_cam_msg), "Kullanıcı/parola boş.");
+    return;
+  }
+  camera_access_set_context(e->ip, e->http_port, e->vendor);
+  snprintf(e->note, sizeof(e->note), "elle: %s/%.16s", g_cam_muser, g_cam_mpass);
+  if (camera_access_try_credentials(e->ip, g_cam_muser, g_cam_mpass) == 0) {
+    e->state = GC_TRYING;
+    snprintf(g_cam_msg, sizeof(g_cam_msg), "%s için elle kimlik denemesi.", e->ip);
+  } else {
+    snprintf(e->note, sizeof(e->note), "elle deneme başlatılamadı (meşgul?)");
+  }
+}
+static void gc_do_watch(GcEntry *e) {
+  if (e->stream_slot >= 0) return;
+  if (!video_stream_ffmpeg_available()) {
+    snprintf(e->note, sizeof(e->note), "ffmpeg yok - izleme devre dışı");
+    snprintf(g_cam_msg, sizeof(g_cam_msg), "ffmpeg bulunamadı; izleme yapılamaz.");
+    return;
+  }
+  if (!e->found_url[0]) {
+    snprintf(g_cam_msg, sizeof(g_cam_msg), "Önce erişin (found_url yok).");
+    return;
+  }
+  int slot = video_stream_open(e->found_url, 0, 0, VS_DECODE_SOFT, 1);
+  if (slot < 0) { snprintf(e->note, sizeof(e->note), "akış açılamadı"); return; }
+  video_stream_set_reconnect(slot, 1);
+  e->stream_slot = slot;
+  e->state = GC_STREAMING;
+  snprintf(g_cam_msg, sizeof(g_cam_msg), "%s izleniyor: %s", e->ip, e->found_url);
+}
+static void gc_do_snapshot(GcEntry *e) {
+  char path[300];
+  snprintf(path, sizeof(path), GC_SNAP_DIR "/cam_%s.png", e->ip);
+  mkdir(GC_SNAP_DIR, 0755);
+  int rc = -1;
+  if (e->stream_slot >= 0) rc = video_stream_snapshot(e->stream_slot, path);
+  if (rc != 0) rc = camera_access_snapshot(e->ip, path);
+  if (rc == 0)
+    snprintf(g_cam_msg, sizeof(g_cam_msg), "Anlık görüntü kaydedildi: %.150s", path);
+  else
+    snprintf(g_cam_msg, sizeof(g_cam_msg), "Snapshot alınamadı (%s).", e->ip);
+}
+static void gc_do_record(GcEntry *e) {
+  if (e->stream_slot < 0) {
+    snprintf(g_cam_msg, sizeof(g_cam_msg), "Kayıt için önce izleyin.");
+    return;
+  }
+  if (video_stream_recording(e->stream_slot)) {
+    video_stream_record_stop(e->stream_slot);
+    e->recording = 0;
+    snprintf(g_cam_msg, sizeof(g_cam_msg), "Kayıt durduruldu.");
+  } else {
+    char pat[300];
+    mkdir(GC_SNAP_DIR, 0755);
+    snprintf(pat, sizeof(pat), GC_SNAP_DIR "/rec_%s_%%03d.mp4", e->ip);
+    if (video_stream_record_start(e->stream_slot, pat, 60) == 0) {
+      e->recording = 1;
+      snprintf(g_cam_msg, sizeof(g_cam_msg), "Kayıt başladı (%.150s).", pat);
+    } else {
+      snprintf(g_cam_msg, sizeof(g_cam_msg), "Kayıt başlatılamadı.");
+    }
+  }
+}
+static void gc_do_fingerprint(GcEntry *e) {
+  int hp = e->http_port > 0 ? e->http_port : 80;
+  char vendor[64]={0}, model[64]={0}, fw[64]={0}, serial[64]={0};
+  snprintf(g_cam_msg, sizeof(g_cam_msg), "Parmak izi sorgulanıyor (%s)...", e->ip);
+  int n = camera_vuln_fingerprint_http(e->ip, hp, 0, vendor, sizeof(vendor),
+                                       model, sizeof(model), fw, sizeof(fw),
+                                       serial, sizeof(serial));
+  if (vendor[0] && !e->vendor[0]) snprintf(e->vendor, sizeof(e->vendor), "%s", vendor);
+  if (model[0]) snprintf(e->model, sizeof(e->model), "%s", model);
+  OnvifDeviceInfo di; memset(&di, 0, sizeof(di));
+  static const CamCred onvif_seed[] = {
+    {"admin","admin"},{"admin","12345"},{"admin",""},
+    {"admin","password"},{"root","root"},{NULL,NULL}};
+  int got_onvif = 0;
+  for (int i = 0; onvif_seed[i].user; i++)
+    if (onvif_probe_device(e->ip, hp, 0, onvif_seed[i].user,
+                           onvif_seed[i].pass, &di) == 0) { got_onvif=1; break; }
+  char vb[80]={0},mb[80]={0},fb[80]={0},sb[80]={0};
+  if (vendor[0]) snprintf(vb,sizeof(vb)," vendor=%.40s",vendor);
+  if (model[0])  snprintf(mb,sizeof(mb)," model=%.40s",model);
+  if (fw[0])     snprintf(fb,sizeof(fb)," fw=%.40s",fw);
+  if (serial[0]) snprintf(sb,sizeof(sb)," s/n=%.40s",serial);
+  snprintf(e->info,sizeof(e->info),"HTTP:%s%s%s%s%s | ONVIF:%s",
+           n>0?" bulundu":"-",vb,mb,fb,sb,got_onvif?" bulundu":"-");
+  if (got_onvif) {
+    e->onvif_used = 1;
+    if (di.manufacturer[0]) snprintf(e->vendor,sizeof(e->vendor),"%.63s",di.manufacturer);
+    if (di.model[0])         snprintf(e->model,sizeof(e->model),"%.63s",di.model);
+    if (di.stream_uri[0] && !e->found_url[0])
+      snprintf(e->found_url,sizeof(e->found_url),"%s",di.stream_uri);
+  }
+  snprintf(g_cam_msg, sizeof(g_cam_msg), "Parmak izi tamam (%s).", e->ip);
+}
+static void gc_do_vuln(GcEntry *e) {
+  int hp = e->http_port > 0 ? e->http_port : 80;
+  char detail[CA_ERR_LEN] = {0};
+  snprintf(g_cam_msg, sizeof(g_cam_msg), "Zafiyet sondaları (%s)...", e->ip);
+  unsigned m = camera_vuln_probe_authbypass(e->ip, hp, 0,
+                                            e->vendor[0] ? e->vendor : NULL,
+                                            detail, sizeof(detail));
+  e->vuln_mask = m;
+  if (m) {
+    snprintf(e->note, sizeof(e->note), "ZAFİYET: %s", detail[0]?detail:"bulundu");
+    snprintf(g_cam_msg, sizeof(g_cam_msg), "%s: bilinen zafiyet bulgusu!", e->ip);
+  } else {
+    snprintf(e->note, sizeof(e->note), "bilinen zafiyet sondası temiz");
+    snprintf(g_cam_msg, sizeof(g_cam_msg), "%s: zafiyet sondası sonuç yok.", e->ip);
+  }
+}
+
+/* Kamera durum senkronizasyonu */
+static void gc_update_from_jobs(void) {
+  for (int i = 0; i < g_cam_n; i++) {
+    GcEntry *e = &g_cam[i];
+    CameraAccessJob job; memset(&job, 0, sizeof(job));
+    if (!camera_access_get(e->ip, &job)) continue;
+    e->tried = job.tried; e->total = job.total;
+    e->vuln_mask = job.vuln_mask;
+    if (job.vuln_detail[0]) snprintf(e->note,sizeof(e->note),"%s",job.vuln_detail);
+    else if (job.last_error[0]) snprintf(e->note,sizeof(e->note),"%s",job.last_error);
+    if (job.found_url[0])  snprintf(e->found_url,sizeof(e->found_url),"%s",job.found_url);
+    if (job.found_user[0]) snprintf(e->found_user,sizeof(e->found_user),"%s",job.found_user);
+    if (job.found_pass[0]) snprintf(e->found_pass,sizeof(e->found_pass),"%s",job.found_pass);
+    if (job.onvif_used) e->onvif_used = 1;
+    if (e->stream_slot >= 0) { e->state = GC_STREAMING; continue; }
+    switch (job.state) {
+    case CA_QUEUED:
+    case CA_RUNNING: e->state = GC_TRYING; break;
+    case CA_FOUND:
+      if (job.open_stream) e->state = GC_OPEN;
+      else if (job.onvif_used) e->state = GC_ACCESSED;
+      else e->state = GC_CREDS;
+      break;
+    case CA_FAILED:
+    case CA_CANCELLED: e->state = GC_FAILED; break;
+    default: break;
+    }
+  }
+}
+static void gc_poll_streams(void) {
+  for (int i = 0; i < g_cam_n; i++) {
+    GcEntry *e = &g_cam[i];
+    if (e->stream_slot < 0) continue;
+    video_stream_poll(e->stream_slot);
+    int st = video_stream_state(e->stream_slot);
+    if (st == VS_ST_ERROR) {
+      snprintf(e->note, sizeof(e->note), "akış hata/kesildi");
+      e->state = GC_ACCESSED;
+    } else if (st == VS_ST_PLAYING) {
+      e->state = GC_STREAMING;
+    }
+    if (e->recording && !video_stream_recording(e->stream_slot))
+      e->recording = 0;
+  }
+}
+
+/* Kamera modülü public yaşam döngüsü (gui_init/cleanup/draw'dan çağrılır) */
+void gui_camera_init(void) {
+  if (g_cam_ready) return;
+  camera_discovery_init();
+  camera_access_init();
+  video_stream_system_init();
+  mkdir(GC_SNAP_DIR, 0755);
+  g_cam_last_sync = GetTime();
+  g_cam_ready = 1;
+  snprintf(g_cam_msg, sizeof(g_cam_msg), "Kamera modülü hazır.");
+  if (getenv("BEAT_CAM_DEMO")) {
+    struct {
+      const char *ip, *mac, *vendor, *model, *note, *info, *url, *user;
+      GcState st;
+      int rec, onvif, tried, total;
+    } d[] = {
+      {"192.168.1.64","aa:bb:cc:dd:ee:ff","Hikvision Digital Technology",
+       "DS-2CD2T45G0P-I","varsayılan parola bulundu",
+       "ONVIF: Hikvision; firmware 5.6.3",
+       "rtsp://192.168.1.64:554/Streaming/Channels/101","admin",GC_CREDS,1,1,42,120},
+      {"10.0.0.23","11:22:33:44:55:66","Dahua Technology","IPC-HDW2431T-AS",
+       "erişilemedi — kimlik doğrulama başarısız","SSDP kimlik: Dahua",
+       "","",GC_FAILED,0,0,0,0},
+      {"172.16.5.9","de:ad:be:ef:00:01","XiongMai","Ağ Kamerası",
+       "akış hata/kesildi","Parmak izi: web arayüzü",
+       "rtsp://172.16.5.9:554/live0.264","root",GC_STREAMING,1,1,27,64},
+    };
+    for (unsigned di = 0; di < sizeof(d)/sizeof(d[0]); di++) {
+      if (gc_add(d[di].ip) < 0) continue;
+      GcEntry *e = &g_cam[g_cam_n-1];
+      snprintf(e->mac,   sizeof(e->mac),   "%s", d[di].mac);
+      snprintf(e->vendor,sizeof(e->vendor),"%s", d[di].vendor);
+      snprintf(e->model, sizeof(e->model), "%s", d[di].model);
+      snprintf(e->note,  sizeof(e->note),  "%s", d[di].note);
+      snprintf(e->info,  sizeof(e->info),  "%s", d[di].info);
+      snprintf(e->found_url, sizeof(e->found_url), "%s", d[di].url);
+      snprintf(e->found_user,sizeof(e->found_user),"%s", d[di].user);
+      e->rtsp_port=554; e->http_port=80;
+      e->state=d[di].st; e->recording=d[di].rec;
+      e->onvif_used=d[di].onvif;
+      e->tried=d[di].tried; e->total=d[di].total;
+      e->vuln_mask=0x5;
+    }
+    if (g_cam_n > 0) snprintf(g_cam_sel, sizeof(g_cam_sel), "%s", g_cam[0].ip);
+    snprintf(g_cam_msg, sizeof(g_cam_msg), "Demo: kamera modülü.");
+  }
+}
+void gui_camera_cleanup(void) {
+  if (!g_cam_ready) return;
+  for (int i = 0; i < g_cam_n; i++) gc_close_stream(&g_cam[i]);
+  video_stream_system_shutdown();
+  camera_access_shutdown();
+  camera_discovery_cleanup();
+  g_cam_ready = 0;
+}
+void gui_camera_tick(void) {
+  if (!g_cam_ready) return;
+  double now = GetTime();
+  gc_update_from_jobs();
+  gc_poll_streams();
+  if (now - g_cam_last_sync > 1.0) {
+    gc_merge_discovery();
+    g_cam_last_sync = now;
+  }
+}
+
+/* Dashboard kamera listesi paneli */
+void gui_camera_draw_list_panel(int rx, int ry, int rw, int rh) {
+  DrawRoundedPanel((Rectangle){rx, ry, rw, rh},
+                   COLOR_PANEL, ui_alpha(COLOR_BORDER, 140));
+  draw_panel_title(rx + 10, ry + 10, "KAMERA LİSTESİ", 12, COLOR_ACCENT);
+  {
+    char cnt[40]; snprintf(cnt, sizeof(cnt), "%d", g_cam_n);
+    int cw = gc_text_w(cnt, 9) + 10;
+    draw_badge(rx + rw - 10 - cw, ry + 7, cnt, 9, COLOR_ACCENT);
+  }
+  int bw = (rw - 24) / 2;
+  Rectangle b_scan  = {(float)(rx+10), (float)(ry+30), (float)bw, 20};
+  Rectangle b_clear = {(float)(rx+10+bw+4), (float)(ry+30), (float)bw, 20};
+  if (draw_cam_btn(b_scan, camera_discovery_is_scanning() ? "İPTAL" : "KAMERA BUL",
+                   COLOR_GREEN, 1))
+    gc_do_scan();
+  if (draw_cam_btn(b_clear, "BOŞALT", COLOR_RED, g_cam_n > 0)) gc_clear_all();
+  Rectangle tb = {(float)(rx+10), (float)(ry+54), (float)(rw-20), 20};
+  if (GuiTextBox(tb, g_cam_target, sizeof(g_cam_target), g_cam_target_edit))
+    g_cam_target_edit = !g_cam_target_edit;
+  int top = ry + 104;
+  int list_h = rh - (top - ry) - 22;
+  {
+    CameraScanResults res; memset(&res, 0, sizeof(res));
+    camera_discovery_get_results(&res);
+    char line[200];
+    if (res.is_scanning)
+      snprintf(line,sizeof(line),"%s  %d%%",res.phase[0]?res.phase:"taranıyor",res.progress);
+    else if (g_cam_n > 0)
+      snprintf(line,sizeof(line),"son tarama: %d kamera",g_cam_n);
+    else
+      snprintf(line,sizeof(line),"kamera yok - tara");
+    DrawTextC(g_cam_target[0] ? "Hedef: elle girildi" : "Hedef: boş = yerel ağ",
+              rx+10, ry+78, 7, COLOR_TEXT_SEC);
+    DrawTextC(line, rx+10, ry+88, 8, COLOR_TEXT_DIM);
+    if (res.is_scanning) {
+      Rectangle pb = {(float)(rx+10),(float)(ry+99),(float)(rw-20),4};
+      DrawRectangleRounded(pb,0.5f,4,(Color){30,40,60,200});
+      Rectangle pf = pb; pf.width = (rw-20)*(res.progress/100.0f);
+      DrawRectangleRounded(pf,0.5f,4,COLOR_ACCENT);
+    }
+  }
+  BeginScissorModeScaled(rx+6, top, rw-12, list_h);
+  float fy = (float)top - g_cam_scroll_list;
+  for (int i = 0; i < g_cam_n; i++) {
+    GcEntry *e = &g_cam[i];
+    if (fy + GC_ROW_H >= top && fy <= top + list_h) {
+      Rectangle row = {(float)(rx+6), fy, (float)(rw-12), (float)(GC_ROW_H-2)};
+      Vector2 mp = GetMousePosition();
+      int hov = CheckCollisionPointRec(mp, row);
+      int sel = (strcmp(e->ip, g_cam_sel) == 0);
+      if (sel) DrawRectangleRounded(row,0.25f,4,COLOR_SELECTED);
+      else if (hov) DrawRectangleRounded(row,0.25f,4,(Color){255,255,255,8});
+      Color sc = gc_state_color(e->state);
+      draw_led(row.x+8, fy+9, 3.5f, sc,
+               e->state==GC_TRYING||e->state==GC_STREAMING);
+      const char *st = gc_state_text(e->state);
+      int st_w = gc_text_w(st,8);
+      int xbtn_x = (int)(row.x+row.width)-14;
+      DrawTextC(e->ip, (int)row.x+18, (int)fy+4, 10, COLOR_TEXT);
+      const char *sub = e->vendor[0]?e->vendor:(e->mac[0]?e->mac:"");
+      if (sub[0]) DrawTextC(sub, (int)row.x+18, (int)fy+15, 7, COLOR_TEXT_DIM);
+      DrawTextC(st, xbtn_x-st_w-6, (int)fy+6, 8, sc);
+      Rectangle xr = {row.x+row.width-14, fy+2, 12, 12};
+      if (CheckCollisionPointRec(mp,xr)) {
+        DrawRectangleRounded(xr,0.3f,4,ui_alpha(COLOR_RED,90));
+        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) { gc_remove(i); break; }
+      }
+      DrawTextC("x",(int)xr.x+3,(int)xr.y,9,COLOR_TEXT_DIM);
+      if (hov && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
+          !CheckCollisionPointRec(mp,xr))
+        snprintf(g_cam_sel,sizeof(g_cam_sel),"%.45s",e->ip);
+    }
+    fy += GC_ROW_H;
+  }
+  EndScissorMode();
+  draw_custom_scrollbar(rx+rw-8, top, 6, list_h,
+                        g_cam_n*GC_ROW_H, &g_cam_scroll_list);
+  if (g_cam_msg[0])
+    DrawTextC(g_cam_msg, rx+10, ry+rh-14, 8, COLOR_TEXT_DIM);
+}
 
 
 /* ========== Header (BEAT System HUD) ========== */
@@ -3040,8 +3553,246 @@ static void draw_panel_tools(int W, int H) {
     }
   }
   else if (g_tools_subtab == 3) {
-    /* === Kameralar (Kesif / Erisim / Izleme) === */
-    gui_camera_draw_tools_panel(W, H);
+    /* === Kameralar (Keşif / Erişim / İzleme) === */
+    /* Sol panel genişliği ve sağ panel konumu — diğer araçlarla aynı */
+    int cam_list_w = 300;
+    int cam_rx = 12 + cam_list_w + 8;
+    int cam_rw  = W - cam_rx - 12;
+
+    /* --- Sol: kamera listesi paneli --- */
+    DrawRoundedPanel((Rectangle){12, py, cam_list_w, panel_h},
+                     COLOR_PANEL, ui_alpha(COLOR_BORDER, 150));
+    draw_panel_title(20, py + 8, "KAMERA LİSTESİ", 13, COLOR_ACCENT);
+    {
+      char cnt[16]; snprintf(cnt,sizeof(cnt),"%d",g_cam_n);
+      int bw2 = gc_text_w(cnt,9)+10;
+      draw_badge(12+cam_list_w-bw2-10, py+7, cnt, 9, COLOR_ACCENT);
+    }
+
+    /* Tarama / Boşalt butonları */
+    int bw = (cam_list_w - 28) / 2;
+    Rectangle b_scan  = {20,         (float)(py+32), (float)bw, 24};
+    Rectangle b_clear = {20+bw+4,    (float)(py+32), (float)bw, 24};
+    if (draw_cam_btn(b_scan,
+          camera_discovery_is_scanning() ? "TARAMAYI İPTAL" : "KAMERA BUL",
+          COLOR_GREEN, 1))
+      gc_do_scan();
+    if (draw_cam_btn(b_clear, "BOŞALT", COLOR_RED, g_cam_n > 0))
+      gc_clear_all();
+
+    /* Hedef IP/CIDR girişi */
+    Rectangle tb = {20, (float)(py+60), (float)(cam_list_w-16), 22};
+    if (GuiTextBox(tb, g_cam_target, sizeof(g_cam_target), g_cam_target_edit))
+      g_cam_target_edit = !g_cam_target_edit;
+    DrawTextC(g_cam_target[0] ? "Hedef: elle girildi (dışlama kapalı)"
+                              : "Hedef: boş = yerel ağ (ör. 192.168.18.0/24)",
+              20, py+86, 7, COLOR_TEXT_SEC);
+
+    /* Tarama durumu / ilerleme çubuğu */
+    {
+      CameraScanResults res; memset(&res,0,sizeof(res));
+      camera_discovery_get_results(&res);
+      char line[200];
+      if (res.is_scanning)
+        snprintf(line,sizeof(line),"%s  %d%%",
+                 res.phase[0]?res.phase:"taranıyor",res.progress);
+      else if (g_cam_n > 0)
+        snprintf(line,sizeof(line),"son tarama: %d kamera",g_cam_n);
+      else
+        snprintf(line,sizeof(line),"kamera yok - tarama başlatın");
+      DrawTextC(line, 20, py+97, 8, COLOR_TEXT_DIM);
+      if (res.is_scanning) {
+        Rectangle pb = {20,(float)(py+108),(float)(cam_list_w-16),4};
+        DrawRectangleRounded(pb,0.5f,4,(Color){30,40,60,200});
+        Rectangle pf = pb; pf.width=(cam_list_w-16)*(res.progress/100.0f);
+        DrawRectangleRounded(pf,0.5f,4,COLOR_ACCENT);
+      }
+    }
+
+    /* Kamera listesi satırları */
+    int l_top = py + 116;
+    int l_h   = panel_h - (l_top - py) - 8;
+    int item_h = GC_ROW_H;
+    float cam_max_sc = g_cam_n * item_h - l_h;
+    if (cam_max_sc < 0) cam_max_sc = 0;
+    Rectangle cam_area = {12, l_top, cam_list_w, l_h};
+    if (CheckCollisionPointRec(GetMousePosition(), cam_area)) {
+      g_cam_scroll_list -= GetMouseWheelMove() * 30;
+      if (g_cam_scroll_list < 0) g_cam_scroll_list = 0;
+      if (g_cam_scroll_list > cam_max_sc) g_cam_scroll_list = cam_max_sc;
+    }
+    BeginScissorModeScaled(12+4, l_top, cam_list_w-8, l_h);
+    float fy = (float)l_top - g_cam_scroll_list;
+    for (int i = 0; i < g_cam_n; i++) {
+      GcEntry *e = &g_cam[i];
+      if (fy + item_h >= l_top && fy <= l_top + l_h) {
+        Rectangle row = {16, fy, (float)(cam_list_w-8), (float)(item_h-2)};
+        Vector2 mp = GetMousePosition();
+        int hov = CheckCollisionPointRec(mp, row);
+        int sel = (strcmp(e->ip, g_cam_sel) == 0);
+        if (sel) {
+          DrawRectangleRounded(row,0.2f,4,COLOR_SELECTED);
+          DrawRectangle((int)row.x,(int)fy+2,3,item_h-4,gc_state_color(e->state));
+        } else if (hov) {
+          DrawRectangleRounded(row,0.2f,4,COLOR_PANEL_HOVER);
+        }
+        Color sc = gc_state_color(e->state);
+        draw_led(row.x+12, fy+item_h*0.5f, 3.5f, sc,
+                 e->state==GC_TRYING||e->state==GC_STREAMING);
+        const char *st = gc_state_text(e->state);
+        int st_w = gc_text_w(st,8);
+        int right_edge = (int)(row.x+row.width)-8;
+        DrawTextC(e->ip, (int)row.x+24, (int)fy+3, 10, COLOR_TEXT);
+        char sub2[96];
+        snprintf(sub2,sizeof(sub2),"%s%s%s",
+                 e->vendor[0]?e->vendor:"kamera",
+                 e->model[0]?" · ":"", e->model[0]?e->model:"");
+        DrawTextC(sub2,(int)row.x+24,(int)fy+14,7,COLOR_TEXT_DIM);
+        DrawTextC(st, right_edge-st_w, (int)fy+8, 8, sc);
+        if (hov && IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+          snprintf(g_cam_sel,sizeof(g_cam_sel),"%.45s",e->ip);
+      }
+      fy += item_h;
+    }
+    EndScissorMode();
+    draw_custom_scrollbar(12+cam_list_w-10, l_top, 8, l_h,
+                          g_cam_n*item_h, &g_cam_scroll_list);
+
+    /* --- Sağ: seçili kamera detay paneli --- */
+    DrawRoundedPanel((Rectangle){cam_rx, py, cam_rw, panel_h},
+                     COLOR_PANEL, ui_alpha(COLOR_BORDER, 150));
+
+    int csel = gc_find(g_cam_sel);
+    if (csel < 0) {
+      draw_panel_title(cam_rx+12, py+8, "SEÇİLİ KAMERA", 13, COLOR_ACCENT2);
+      DrawTextC("Soldan bir kamera seçin veya yeni tarama başlatın.",
+                cam_rx+12, py+40, 11, COLOR_TEXT_DIM);
+      if (g_cam_msg[0])
+        DrawTextC(g_cam_msg, cam_rx+12, py+panel_h-16, 9, COLOR_TEXT_DIM);
+    } else {
+      GcEntry *e = &g_cam[csel];
+      /* Başlık */
+      char cam_title[160];
+      snprintf(cam_title,sizeof(cam_title),"SEÇİLİ KAMERA  ·  %s",e->ip);
+      draw_panel_title(cam_rx+12, py+8, cam_title, 13, COLOR_ACCENT2);
+      {
+        int sw = gc_text_w(gc_state_text(e->state),9)+10;
+        draw_badge(cam_rx+cam_rw-sw-12, py+7,
+                   gc_state_text(e->state), 9, gc_state_color(e->state));
+      }
+
+      /* Canlı görüntü alanı */
+      int vx = cam_rx+12, vy = py+34;
+      int vw = cam_rw-24;
+      int vh = (int)(vw*9.0f/16.0f);
+      if (vh > panel_h-220) vh = panel_h-220;
+      if (vh < 120) vh = 120;
+      Rectangle vid = {(float)vx,(float)vy,(float)vw,(float)vh};
+      DrawRectangleRounded(vid,0.04f,4,(Color){2,4,7,255});
+      DrawRectangleRoundedLinesEx(vid,0.04f,4,1.0f,ui_alpha(COLOR_BORDER,160));
+      if (e->stream_slot >= 0) {
+        Texture2D tex = video_stream_texture(e->stream_slot);
+        if (tex.id > 0) {
+          Rectangle src = {0,0,(float)tex.width,(float)tex.height};
+          DrawTexturePro(tex,src,vid,(Vector2){0,0},0.0f,WHITE);
+        } else {
+          DrawTextC("BAĞLANIYOR...",
+                    vx+(vw-gc_text_w("BAĞLANIYOR...",14))/2,
+                    vy+vh/2-8, 14, COLOR_TEXT_SEC);
+        }
+        if (e->recording) {
+          draw_led((float)(vx+vw-22),(float)(vy+16),6,COLOR_RED,1);
+          DrawTextC("REC",vx+vw-52,vy+10,10,COLOR_RED);
+        }
+      } else {
+        DrawTextC("GÖRÜNTÜ YOK",
+                  vx+(vw-gc_text_w("GÖRÜNTÜ YOK",16))/2,
+                  vy+vh/2-10, 16, COLOR_TEXT_DIM);
+        DrawTextC("İzlemek için ERİŞ + İZLE",
+                  vx+(vw-gc_text_w("İzlemek için ERİŞ + İZLE",10))/2,
+                  vy+vh/2+10, 10, COLOR_TEXT_DIM);
+      }
+
+      /* Bilgi satırları */
+      int ctrl_by = py+panel_h-110;
+      int info_y  = vy+vh+8;
+      #define CAM_INFO(fmt,...) do { char _b[256]; snprintf(_b,sizeof(_b),fmt,__VA_ARGS__); \
+        if (info_y+12<=ctrl_by-6) DrawTextC(_b,cam_rx+12,info_y,9,COLOR_TEXT_SEC); \
+        info_y+=14; } while(0)
+      CAM_INFO("MAC: %s    Vendor: %s    Model: %s",
+               e->mac[0]?e->mac:"-", e->vendor[0]?e->vendor:"-",
+               e->model[0]?e->model:"-");
+      CAM_INFO("RTSP: %s:%d    HTTP: %d    ONVIF: %s",
+               e->ip, e->rtsp_port>0?e->rtsp_port:554,
+               e->http_port, e->onvif_used?"var":"-");
+      CAM_INFO("Akış: %s", e->found_url[0]?e->found_url:"(yok)");
+      CAM_INFO("Kimlik: %s", e->found_user[0]?e->found_user:"(yok / açık)");
+      if (e->total > 0) CAM_INFO("Deneme: %d / %d", e->tried, e->total);
+      if (e->note[0])   CAM_INFO("Durum: %s", e->note);
+      if (e->vuln_mask) CAM_INFO("Zafiyet maskesi: 0x%x", e->vuln_mask);
+      if (e->info[0])   CAM_INFO("%s", e->info);
+      #undef CAM_INFO
+      if (g_cam_msg[0] && info_y+10<=ctrl_by-6) {
+        DrawTextC(g_cam_msg,cam_rx+12,info_y,8,COLOR_TEXT_DIM);
+        info_y += 12;
+      }
+      (void)info_y;
+
+      /* Kontrol butonları — üç sıra */
+      int gap = 6, nbtn = 3;
+      int btnw = (cam_rw-24-gap*(nbtn-1))/nbtn;
+      Rectangle r1 = {(float)(cam_rx+12),(float)ctrl_by,(float)btnw,22};
+      Rectangle r2 = {(float)(cam_rx+12+(btnw+gap)),(float)ctrl_by,(float)btnw,22};
+      Rectangle r3 = {(float)(cam_rx+12+(btnw+gap)*2),(float)ctrl_by,(float)btnw,22};
+      int watching = (e->stream_slot >= 0);
+      if (draw_cam_btn(r1, watching?"İZLEMEYİ DURDUR":"İZLE",
+                       COLOR_GREEN, e->found_url[0]||watching)) {
+        if (watching) {
+          gc_close_stream(e);
+          e->state = e->found_url[0] ? GC_ACCESSED : GC_FAILED;
+          snprintf(g_cam_msg,sizeof(g_cam_msg),"İzleme durduruldu.");
+        } else gc_do_watch(e);
+      }
+      if (draw_cam_btn(r2,"ANLIK GÖRÜNTÜ",COLOR_ACCENT,
+                       e->stream_slot>=0||e->found_url[0]))
+        gc_do_snapshot(e);
+      if (draw_cam_btn(r3,e->recording?"KAYDI DURDUR":"KAYIT",
+                       COLOR_RED, e->stream_slot>=0))
+        gc_do_record(e);
+
+      int ctrl_by2 = ctrl_by+26;
+      Rectangle s1={(float)(cam_rx+12),(float)ctrl_by2,(float)btnw,22};
+      Rectangle s2={(float)(cam_rx+12+(btnw+gap)),(float)ctrl_by2,(float)btnw,22};
+      Rectangle s3={(float)(cam_rx+12+(btnw+gap)*2),(float)ctrl_by2,(float)btnw,22};
+      if (draw_cam_btn(s1,"OTONOM ERİŞ",COLOR_AMBER,!camera_access_busy(e->ip)))
+        gc_do_access(e);
+      if (draw_cam_btn(s2,"PARMAK İZİ + ONVIF",COLOR_ACCENT2,1))
+        gc_do_fingerprint(e);
+      if (draw_cam_btn(s3,"ZAFİYET SONDASI",COLOR_RED,1))
+        gc_do_vuln(e);
+
+      /* Elle kimlik satırı */
+      int ctrl_by3 = ctrl_by2+32;
+      int ubw = (cam_rw-24-gap*2-90)/2;
+      Rectangle ub={(float)(cam_rx+12),(float)ctrl_by3,(float)ubw,22};
+      Rectangle pb2={(float)(cam_rx+12+ubw+gap),(float)ctrl_by3,(float)ubw,22};
+      Rectangle db={(float)(cam_rx+12+(ubw+gap)*2),(float)ctrl_by3,
+                    (float)(cam_rw-24-(ubw+gap)*2),22};
+      if (GuiTextBox(ub,g_cam_muser,sizeof(g_cam_muser),g_cam_muser_edit))
+        g_cam_muser_edit=!g_cam_muser_edit;
+      if (GuiTextBox(pb2,g_cam_mpass,sizeof(g_cam_mpass),g_cam_mpass_edit))
+        g_cam_mpass_edit=!g_cam_mpass_edit;
+      DrawTextC("Kullanıcı",(int)ub.x,(int)ub.y-11,8,COLOR_TEXT_SEC);
+      DrawTextC("Parola",(int)pb2.x,(int)pb2.y-11,8,COLOR_TEXT_SEC);
+      if (draw_cam_btn(db,"ELLE DENE",COLOR_GREEN,1)) gc_do_manual(e);
+
+      /* Listeden çıkar */
+      Rectangle cb={(float)(cam_rx+12),(float)(py+panel_h-24),150,20};
+      if (draw_cam_btn(cb,"LİSTEDEN ÇIKAR",COLOR_RED,1)) {
+        gc_remove(csel);
+        g_cam_sel[0]='\0';
+      }
+    }
   }
 }
 

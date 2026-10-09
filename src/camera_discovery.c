@@ -309,13 +309,22 @@ static int is_self_ip(const char *ip) {
     return 0;
 }
 
+/* Kullanici acikca bir hedef (IP/CIDR) verdiginde, otomatik taramadaki
+ * "kendi makinem + gateway + loopback" dislamasi devre disi kalir; boylece
+ * yerel testbed (127.0.0.1) ve kendi alt agindaki kameralar da bulunur.
+ * Otomatik taramada (hedef bos) ise dislama aynen korunur. */
+static int g_explicit_target = 0;
+
 /* Dislanacak hostlar: kendi IP'leri, gateway, ag adresi, broadcast,
  * multicast, 0.0.0.0/8 ve 169.254/16 (link-local). */
 static int is_excluded_host(const char *ip) {
     if (!ip || !ip[0]) return 1;
-    if (is_self_ip(ip)) return 1;
-    if (g_gateway_ip[0] && strcmp(ip, g_gateway_ip) == 0) return 1;
-    if (strcmp(ip, "127.0.0.1") == 0 || strcmp(ip, "0.0.0.0") == 0) return 1;
+    if (!g_explicit_target) {
+        if (is_self_ip(ip)) return 1;
+        if (g_gateway_ip[0] && strcmp(ip, g_gateway_ip) == 0) return 1;
+        if (strcmp(ip, "127.0.0.1") == 0) return 1;
+    }
+    if (strcmp(ip, "0.0.0.0") == 0) return 1;
     if (strcmp(ip, "255.255.255.255") == 0) return 1;
     unsigned a = 0, b = 0, c = 0, d = 0;
     if (sscanf(ip, "%u.%u.%u.%u", &a, &b, &c, &d) != 4) return 1;
@@ -1093,6 +1102,7 @@ static int do_scan(const char *cidr) {
     platform_mutex_unlock(&g_lock);
 
     g_cancel = 0;
+    g_explicit_target = (cidr && cidr[0]) ? 1 : 0;
     gather_self_info();
     load_arp_table();
     camera_discovery_log("ARP tablosu: %d kayit", arp_map_count);

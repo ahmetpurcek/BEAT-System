@@ -1528,8 +1528,6 @@ static void draw_panel_tools(int W, int H) {
     DrawRoundedPanel((Rectangle){12, py, ctrl_w, panel_h}, COLOR_PANEL,
                      ui_alpha(COLOR_BORDER, 150));
     draw_panel_title(18, py + 8, "Paket İzleme", 13, COLOR_ACCENT);
-    DrawTextC("ARAÇ-01", ctrl_w - ui_text_w("ARAÇ-01", 8) - 12, py + 11, 8,
-              COLOR_TEXT_DIM);
 
     int capture_for_this =
         (g_capture_all ||
@@ -2301,8 +2299,6 @@ static void draw_panel_tools(int W, int H) {
     DrawRoundedPanel((Rectangle){12, py, ctrl_w, panel_h}, COLOR_PANEL,
                      ui_alpha(COLOR_BORDER, 150));
     draw_panel_title(18, py + 8, "Site Karartma", 13, COLOR_RED);
-    DrawTextC("ARAÇ-03", ctrl_w - ui_text_w("ARAÇ-03", 8) - 12, py + 11, 8,
-              COLOR_TEXT_DIM);
 
     int cy = py + 28;
 
@@ -2683,8 +2679,6 @@ static void draw_panel_tools(int W, int H) {
     DrawRoundedPanel((Rectangle){12, py, ctrl_w, panel_h}, COLOR_PANEL,
                      ui_alpha(COLOR_BORDER, 150));
     draw_panel_title(18, py + 8, "Port Tarayıcı", 13, COLOR_ACCENT2);
-    DrawTextC("ARAÇ-02", ctrl_w - ui_text_w("ARAÇ-02", 8) - 12, py + 11, 8,
-              COLOR_TEXT_DIM);
 
     portscan_get_results(&g_portscan);
     int is_this =

@@ -86,6 +86,13 @@ static double  g_last_sync = 0.0;
 static int     g_ready = 0;
 static int     g_scan_running = 0;
 
+/* Kullanıcı tarafından girilen tarama hedefi (IP veya CIDR).
+ * Boş bırakılırsa yerel arayüz alt ağı taranır ve kendi makine/gateway
+ * otomatik dışlanır. Doldurulursa bu dışlama devre dışı kalır; böylece
+ * yerel testbed (127.0.0.1) ve kendi alt ağındaki kameralar bulunur. */
+static char    g_target[64] = {0};
+static int     g_target_edit = 0;
+
 /* ========================================================================
  * Çizim yardımcıları (gui.c static'lerinin bağımsız kopyaları)
  * ===================================================================== */
@@ -322,8 +329,11 @@ static void gc_merge_discovery(void) {
  * ===================================================================== */
 static void gc_do_scan(void) {
   if (camera_discovery_is_scanning()) { camera_discovery_cancel(); return; }
-  snprintf(g_msg, sizeof(g_msg), "Kamera keşfi başlatıldı...");
-  camera_discovery_start_async(NULL);   /* NULL -> yerel arayuz alt agi */
+  if (g_target[0])
+    snprintf(g_msg, sizeof(g_msg), "Kamera keşfi başlatıldı: %s", g_target);
+  else
+    snprintf(g_msg, sizeof(g_msg), "Kamera keşfi başlatıldı (yerel ağ)...");
+  camera_discovery_start_async(g_target[0] ? g_target : NULL);
   g_scan_running = 1;
 }
 
@@ -681,8 +691,14 @@ void gui_camera_draw_list_panel(int rx, int ry, int rw, int rh) {
     gc_do_scan();
   if (cam_btn(b_clear, "BOŞALT", COLOR_RED, g_n > 0)) gc_clear_all();
 
+  /* Hedef alanı: boş = yerel ağ (kendi makine/gateway hariç).
+   * Doldurulursa (ör. 127.0.0.1, 192.168.1.0/24) dışlama kalkar. */
+  Rectangle tb = {(float)(rx + 10), (float)(ry + 54), (float)(rw - 20), 20};
+  if (GuiTextBox(tb, g_target, sizeof(g_target), g_target_edit))
+    g_target_edit = !g_target_edit;
+
   /* Tarama durumu */
-  int top = ry + 56;
+  int top = ry + 104;
   int list_h = rh - (top - ry) - 22;
   {
     CameraScanResults res;
@@ -696,11 +712,14 @@ void gui_camera_draw_list_panel(int rx, int ry, int rw, int rh) {
       snprintf(line, sizeof(line), "son tarama: %d kamera", g_n);
     else
       snprintf(line, sizeof(line), "kamera yok - tara");
-    cam_txt_fit(line, rx + 10, ry + 56 - 14 + 1, 8, COLOR_TEXT_DIM, rw - 20);
+    cam_txt_fit(g_target[0] ? "Hedef: elle girildi (kendi makine/gateway dahil taranır)"
+                            : "Hedef: boş = yerel ağ (ör. 127.0.0.1 veya 192.168.1.0/24)",
+                rx + 10, ry + 78, 7, COLOR_TEXT_SEC, rw - 20);
+    cam_txt_fit(line, rx + 10, ry + 88, 8, COLOR_TEXT_DIM, rw - 20);
 
     /* ilerleme çubuğu */
     if (res.is_scanning) {
-      Rectangle pb = {(float)(rx + 10), (float)(ry + 55), (float)(rw - 20), 4};
+      Rectangle pb = {(float)(rx + 10), (float)(ry + 99), (float)(rw - 20), 4};
       DrawRectangleRounded(pb, 0.5f, 4, (Color){30, 40, 60, 200});
       Rectangle pf = pb;
       pf.width = (rw - 20) * (res.progress / 100.0f);
@@ -786,7 +805,15 @@ void gui_camera_draw_tools_panel(int W, int H) {
     gc_do_scan();
   if (cam_btn(b_clear, "BOŞALT", COLOR_RED, g_n > 0)) gc_clear_all();
 
-  int l_top = py + 62;
+  /* Hedef alanı: boş = yerel ağ (kendi makine/gateway hariç). */
+  Rectangle tb = {(float)(lx + 12), (float)(py + 58), (float)(list_w - 24), 20};
+  if (GuiTextBox(tb, g_target, sizeof(g_target), g_target_edit))
+    g_target_edit = !g_target_edit;
+  cam_txt(g_target[0] ? "Hedef: elle girildi (dışlama kapalı)"
+                      : "Hedef: boş = yerel ağ (ör. 127.0.0.1)",
+          lx + 12, py + 82, 7, COLOR_TEXT_SEC);
+
+  int l_top = py + 96;
   int l_h = panel_h - (l_top - py) - 8;
   cam_scissor(lx + 6, l_top, list_w - 12, l_h);
   float y = (float)l_top - g_scroll_list;

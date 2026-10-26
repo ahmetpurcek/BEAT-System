@@ -29,6 +29,11 @@ set(SOURCES
     src/video_stream.c
     src/cam_net.c
     src/camera_vuln.c
+    src/sentinel_core.c
+    src/sentinel_fw.c
+    src/sentinel_proto.c
+    src/sentinel_fuzz.c
+    src/sentinel_exploit.c
 )
 
 # Hedef
@@ -68,6 +73,14 @@ target_link_libraries(beat_system PRIVATE PkgConfig::RAYLIB)
 # libpcap
 pkg_check_modules(PCAP REQUIRED IMPORTED_TARGET libpcap)
 target_link_libraries(beat_system PRIVATE PkgConfig::PCAP)
+
+# SENTINEL: DES crypt (firmware /etc/passwd hash dogrulama)
+find_library(CRYPT_LIB crypt)
+if(CRYPT_LIB)
+    target_link_libraries(beat_system PRIVATE ${CRYPT_LIB})
+else()
+    message(STATUS "libcrypt yok: firmware DES hash dogrulamasi devre disi")
+endif()
 
 # Threads (pthread)
 find_package(Threads REQUIRED)

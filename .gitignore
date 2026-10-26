@@ -15,3 +15,7 @@ Makefile
 *.out
 
 
+sentinel_fw/
+sentinel_reports/
+*.db
+build-dbg/

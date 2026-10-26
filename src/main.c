@@ -16,6 +16,7 @@
 #include "arp_block.h"
 #include "port_scanner.h"
 #include "gui.h"
+#include "sentinel.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -49,8 +50,58 @@ static void usage(const char *argv0) {
         "  --duration <sn>       Calisma suresi (0 = sonsuz, Ctrl+C ile dur)\n"
         "  --out <dosya>         Uyarilari JSONL olarak bu dosyaya da yaz\n"
         "  --quiet               Uyari basliklarini stdout'a yazma (sadece sayac)\n"
-        "\n",
-        argv0, argv0);
+        "\n"
+        "SENTINEL (cevrimdisi firmware analizi):\n"
+        "  %s --sentinel-fw <imaj>\n"
+        "  Ornek: sudo %s --sentinel-fw /root/beat-fw/FW_TV-IP310PI-5.0.1.dav\n\n",
+        argv0, argv0, argv0, argv0);
+}
+
+/* ==================== SENTINEL: cevrimdisi firmware ==================== */
+
+/* GUI'siz firmware dogrulamasi: unpack + secret mining + rapor.
+ * Kamera recon motoruna dokunmaz; yalnizca sentinel_*.c modullerini kullanir. */
+static int sentinel_fw_cli(const char *image) {
+    if (!image || !*image) {
+        fprintf(stderr, "--sentinel-fw icin imaj yolu gerekli\n");
+        return 2;
+    }
+    if (sn_init("sentinel.yaml") != 0) {
+        fprintf(stderr, "SENTINEL baslatilamadi\n");
+        return 1;
+    }
+
+    SnFwResult fw;
+    memset(&fw, 0, sizeof(fw));
+    printf("[SENTINEL] firmware analizi: %s\n", image);
+    fflush(stdout);
+
+    int rc = sn_fw_analyze(image, &fw, 1);
+    if (rc == 0) sn_fw_state_set(&fw);   /* rapor 4. bolumu bu sonucu basar */
+    printf("\n[SENTINEL] === FIRMWARE OZETI ===\n");
+    printf("  imaj        : %s\n", fw.path);
+    printf("  sha256      : %s\n", fw.sha256[0] ? fw.sha256 : "-");
+    printf("  kapsayici   : %s\n", fw.container[0] ? fw.container : "-");
+    printf("  dosya sist. : %s\n", fw.filesystem[0] ? fw.filesystem : "-");
+    printf("  sifreli     : %s\n", fw.encrypted ? "evet" : "hayir");
+    printf("  dosya/ikili : %d / %d\n", fw.files, fw.binaries);
+    printf("  sir         : %d\n", fw.secrets);
+    printf("  riskli cagri: %d\n", fw.unsafe_calls);
+    printf("  pre-auth    : %d\n", fw.preauth_candidates);
+    printf("  cikarim     : %s\n", fw.extract_dir[0] ? fw.extract_dir : "-");
+
+    static SnFinding fs[SN_MAX_FINDINGS];
+    int n = sn_get_findings(fs, SN_MAX_FINDINGS);
+    printf("\n[SENTINEL] === BULGULAR (%d) ===\n", n);
+    for (int i = 0; i < n; i++) {
+        printf("  [%d] %-8s CVSS%.1f %-10s %s\n      %s\n      sinif=%s cwe=%s\n",
+               i + 1, fs[i].severity, fs[i].cvss, fs[i].status, fs[i].title,
+               fs[i].detail, fs[i].cls, fs[i].cwe[0] ? fs[i].cwe : "-");
+        if (fs[i].evidence[0]) printf("      kanit=%s\n", fs[i].evidence);
+    }
+
+    sn_shutdown();
+    return rc == 0 ? 0 : 1;
 }
 
 /* CIDR'i IDS_SCOPE_MAX sinirina kadar genisletip diziye doldurur. */
@@ -298,6 +349,10 @@ static int headless_run(int argc, char *argv[]) {
 int main(int argc, char *argv[]) {
     if (argc > 1 && !strcmp(argv[1], "--headless"))
         return headless_run(argc, argv);
+
+    /* SENTINEL cevrimdisi firmware modu (GUI'siz dogrulama) */
+    if (argc > 2 && !strcmp(argv[1], "--sentinel-fw"))
+        return sentinel_fw_cli(argv[2]);
 
     printf("=== BEAT System ===\n");
     printf("Platform: %s\n", PLATFORM_NAME);

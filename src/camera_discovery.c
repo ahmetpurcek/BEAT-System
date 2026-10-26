@@ -3,7 +3,9 @@
  *
  * Pasif/aktif keşif hattı:
  *   ARP tablosu (MAC) -> hedef listesi -> paralel port taraması ->
- *   RTSP/HTTP derin sonda -> ONVIF WS-Discovery birleştirme -> skorlama.
+ *   genişletilmiş port turu (MAC'i çözülen hostlarda) ->
+ *   RTSP/HTTP derin sonda -> TLS sertifika sondası (443/8443) ->
+ *   ONVIF WS-Discovery (iki tur: multicast + broadcast) -> skorlama.
  *
  * Harici bağımlılık yok: POSIX soketleri + standart C kütüphanesi.
  */
@@ -14,6 +16,7 @@
 
 #include <stdio.h>
 #include <stdarg.h>
+#include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
 #include <time.h>
@@ -26,6 +29,13 @@
 #include <net/if.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/time.h>
+
+#ifdef HAVE_OPENSSL
+#include <openssl/ssl.h>
+#include <openssl/x509.h>
+#include <openssl/x509v3.h>
+#endif
 
 /* ========== Global State ========== */
 static CameraScanResults  g_results;
@@ -504,6 +514,15 @@ static int ssdp_mdns_discover(char hosts[][MAX_IP_LEN], int *total, int max) {
     return added;
 }
 
+/* ========== Zaman yardımcısı ========== */
+/* Monotonik saat (ms). Duvarsaati siçramalarindan ve saat dilimi
+ * degisimlerinden etkilenmez; bekleme pencereleri icin kullanilir. */
+static long long mono_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
 /* ========== Soket yardımcıları ========== */
 static int sock_send_all(int fd, const char *buf, int len, int timeout_ms) {
     int sent = 0;
@@ -562,6 +581,78 @@ static int tcp_open(const char *ip, int port, int timeout_ms) {
         return -1;
     }
     return fd;
+}
+
+/* ========== Genişletilmiş port turu (fan-out) ========== */
+/* Ayni host uzerindeki cok sayida portu tek poll penceresinde dener.
+ * Bloklamayan connect + SO_ERROR ile acik portlar toplanir.
+ * Donus: acik port sayisi (open_out'a yazilir). */
+static int tcp_sweep_fanout(const char *ip, const int *ports, int count,
+                            int *open_out, int max_open, int timeout_ms) {
+    if (!ip || !ports || count <= 0 || !open_out || max_open <= 0) return 0;
+    int cap = count < 128 ? count : 128;
+    int fds[128];
+    int prt[128];
+    int nfd = 0;
+    int opened = 0;
+
+    struct sockaddr_in sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sin_family = AF_INET;
+    if (inet_pton(AF_INET, ip, &sa.sin_addr) != 1) return 0;
+
+    for (int i = 0; i < cap; i++) {
+        int fd = socket(AF_INET, SOCK_STREAM, 0);
+        if (fd < 0) continue;
+        int fl = fcntl(fd, F_GETFL, 0);
+        fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+        sa.sin_port = htons((unsigned short)ports[i]);
+        int r = connect(fd, (struct sockaddr *)&sa, sizeof(sa));
+        if (r == 0) {
+            if (opened < max_open) open_out[opened++] = ports[i];
+            close(fd);
+            continue;
+        }
+        if (errno != EINPROGRESS) { close(fd); continue; }
+        fds[nfd] = fd;
+        prt[nfd] = ports[i];
+        nfd++;
+    }
+    if (nfd == 0) return opened;
+
+    struct pollfd pfds[128];
+    char done[128];
+    memset(done, 0, sizeof(done));
+    for (int i = 0; i < nfd; i++) {
+        pfds[i].fd = fds[i];
+        pfds[i].events = POLLOUT;
+        pfds[i].revents = 0;
+    }
+
+    long long deadline = mono_ms() + (timeout_ms > 0 ? timeout_ms : 250);
+    int pending = nfd;
+    while (pending > 0) {
+        long long left = deadline - mono_ms();
+        if (left <= 0) break;
+        int pr = poll(pfds, (nfds_t)nfd, (int)left);
+        if (pr <= 0) {
+            if (pr < 0 && errno == EINTR) continue;
+            break;
+        }
+        for (int i = 0; i < nfd; i++) {
+            if (done[i] || pfds[i].revents == 0) continue;
+            int err = 0;
+            socklen_t el = sizeof(err);
+            if (getsockopt(fds[i], SOL_SOCKET, SO_ERROR, &err, &el) == 0 && err == 0) {
+                if (opened < max_open) open_out[opened++] = prt[i];
+            }
+            done[i] = 1;
+            pfds[i].fd = -1;
+            pending--;
+        }
+    }
+    for (int i = 0; i < nfd; i++) if (fds[i] >= 0) close(fds[i]);
+    return opened;
 }
 
 /* ========== RTSP sondası ========== */
@@ -713,6 +804,100 @@ static int http_probe(const char *ip, int port, CameraDevice *cam) {
     return is_camera_ui ? 2 : (found ? 1 : 0);
 }
 
+/* ========== TLS sertifika sondası (443/8443) ========== */
+#ifdef HAVE_OPENSSL
+/* Sertifika adindaki O / CN / OU alanlarini tek metinde toplar. */
+static void name_fields(X509_NAME *nm, char *out, int len) {
+    if (!out || len <= 0) return;
+    out[0] = '\0';
+    if (!nm) return;
+    static const int nids[] = { NID_organizationName, NID_commonName, NID_organizationalUnitName };
+    for (int i = 0; i < 3; i++) {
+        char buf[256];
+        buf[0] = '\0';
+        if (X509_NAME_get_text_by_NID(nm, nids[i], buf, sizeof(buf)) <= 0) continue;
+        if (!buf[0]) continue;
+        size_t used = strlen(out);
+        if (used && used + 3 >= (size_t)len) continue;
+        if (used) snprintf(out + used, (size_t)len - used, " | %s", buf);
+        else snprintf(out, (size_t)len, "%s", buf);
+    }
+}
+
+/* TLS el sikismasi yapip sertifika konu/veren alanlarini okur.
+ * Sadece okuma amacli; sertifika dogrulanmaz (kamera kendinden imzali). */
+static int tls_cert_probe(const char *ip, int port, char *subj, int sublen,
+                          char *iss, int isslen) {
+    if (subj && sublen > 0) subj[0] = '\0';
+    if (iss && isslen > 0) iss[0] = '\0';
+    if (!ip || !ip[0] || port <= 0) return 0;
+
+#if OPENSSL_VERSION_NUMBER < 0x10100000L
+    SSL_library_init();
+    SSL_load_error_strings();
+#else
+    OPENSSL_init_ssl(0, NULL);
+#endif
+
+    SSL_CTX *ctx = SSL_CTX_new(TLS_client_method());
+    if (!ctx) return 0;
+    SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, NULL);
+
+    SSL *ssl = SSL_new(ctx);
+    if (!ssl) { SSL_CTX_free(ctx); return 0; }
+
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) { SSL_free(ssl); SSL_CTX_free(ctx); return 0; }
+
+    struct timeval tv;
+    tv.tv_sec = 2;
+    tv.tv_usec = 0;
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+    struct sockaddr_in sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons((unsigned short)port);
+    if (inet_pton(AF_INET, ip, &sa.sin_addr) != 1 ||
+        connect(fd, (struct sockaddr *)&sa, sizeof(sa)) != 0) {
+        close(fd);
+        SSL_free(ssl);
+        SSL_CTX_free(ctx);
+        return 0;
+    }
+
+    SSL_set_fd(ssl, fd);
+    int got = 0;
+    if (SSL_connect(ssl) == 1) {
+        X509 *cert;
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+        cert = SSL_get1_peer_certificate(ssl);
+#else
+        cert = SSL_get_peer_certificate(ssl);
+#endif
+        if (cert) {
+            name_fields(X509_get_subject_name(cert), subj, sublen);
+            name_fields(X509_get_issuer_name(cert), iss, isslen);
+            X509_free(cert);
+            got = 1;
+        }
+    }
+    SSL_shutdown(ssl);
+    SSL_free(ssl);
+    close(fd);
+    SSL_CTX_free(ctx);
+    return got;
+}
+#else
+/* OpenSSL yoksa TLS sondasi sessizce devre disi kalir. */
+static int tls_cert_probe(const char *ip, int port, char *subj, int sublen,
+                          char *iss, int isslen) {
+    (void)ip; (void)port; (void)subj; (void)sublen; (void)iss; (void)isslen;
+    return 0;
+}
+#endif
+
 /* ========== ONVIF WS-Discovery ========== */
 typedef struct {
     char ip[MAX_IP_LEN];
@@ -727,48 +912,22 @@ static const char *WS_PROBE =
     "xmlns:w=\"http://schemas.xmlsoap.org/ws/2004/08/addressing\" "
     "xmlns:d=\"http://schemas.xmlsoap.org/ws/2005/04/discovery\" "
     "xmlns:dn=\"http://www.onvif.org/ver10/network/wsdl\">"
-    "<e:Header><w:MessageID>uuid:beat-scan</w:MessageID>"
+    "<e:Header><w:MessageID>%s</w:MessageID>"
     "<w:To e:mustUnderstand=\"true\">urn:schemas-xmlsoap-org:ws:2005:04:discovery</w:To>"
     "<w:Action e:mustUnderstand=\"true\">"
     "http://schemas.xmlsoap.org/ws/2005/04/discovery/Probe</w:Action></e:Header>"
     "<e:Body><d:Probe><d:Types>dn:NetworkVideoTransmitter</d:Types></d:Probe>"
     "</e:Body></e:Envelope>";
 
-static int ws_discovery_gather(OnvifHit *hits, int max_hits, int wait_ms) {
-    int found = 0;
-    int fd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (fd < 0) return 0;
+/* Bir tur icin yanitlari toplar; bulunan toplam hit sayisini doner. */
+static int ws_collect(int fd, OnvifHit *hits, int max_hits, int found, int wait_ms) {
 
-    struct sockaddr_in local;
-    memset(&local, 0, sizeof(local));
-    local.sin_family = AF_INET;
-    local.sin_addr.s_addr = htonl(INADDR_ANY);
-    local.sin_port = 0;
-    if (bind(fd, (struct sockaddr *)&local, sizeof(local)) < 0) { close(fd); return 0; }
-
-    struct ip_mreq mreq;
-    memset(&mreq, 0, sizeof(mreq));
-    inet_pton(AF_INET, "239.255.255.250", &mreq.imr_multiaddr);
-    mreq.imr_interface.s_addr = htonl(INADDR_ANY);
-    setsockopt(fd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq));
-
-    unsigned char ttl = 2;
-    setsockopt(fd, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof(ttl));
-
-    struct sockaddr_in dst;
-    memset(&dst, 0, sizeof(dst));
-    dst.sin_family = AF_INET;
-    dst.sin_port = htons(3702);
-    inet_pton(AF_INET, "239.255.255.250", &dst.sin_addr);
-    sendto(fd, WS_PROBE, strlen(WS_PROBE), 0, (struct sockaddr *)&dst, sizeof(dst));
-
-    long long deadline = (long long)time(NULL) * 1000 + wait_ms;
+    long long deadline = mono_ms() + wait_ms;
     while (found < max_hits) {
-        long long now = (long long)time(NULL) * 1000;
-        int left = (int)(deadline - now);
+        long long left = deadline - mono_ms();
         if (left <= 0) break;
         struct pollfd pfd = { .fd = fd, .events = POLLIN };
-        if (poll(&pfd, 1, left) <= 0) break;
+        if (poll(&pfd, 1, (int)left) <= 0) break;
 
         unsigned char rbuf[8192];
         struct sockaddr_in from;
@@ -809,6 +968,115 @@ static int ws_discovery_gather(OnvifHit *hits, int max_hits, int wait_ms) {
         }
         found++;
     }
+    return found;
+}
+
+/* Her turda benzersiz MessageID uretir. Cihazlar ayni MessageID ile gelen
+ * tekrarlanan Probe'lara yanit vermeyebiliyor. */
+static void ws_msgid(char *out, int len) {
+    static unsigned int seq = 0;
+    unsigned int r1 = (unsigned int)rand();
+    unsigned int r2 = (unsigned int)rand();
+    unsigned int r3 = (unsigned int)time(NULL);
+    unsigned int s = __sync_add_and_fetch(&seq, 1);
+    snprintf(out, len, "uuid:%08x-%04x-4%03x-%04x-%08x%04x",
+             r1,
+             (r2 >> 16) & 0xFFFF,
+             (r3 + s) & 0x0FFF,
+             ((r3 >> 4) & 0x3FFF) | 0x8000,
+             (s * 2654435761u) ^ r2,
+             r1 & 0xFFFF);
+}
+
+/* g_net_range'ten (orn. "192.168.1.0/24") alt ag broadcast adresini uretir. */
+static int net_broadcast_addr(char *out, int len) {
+    if (!out || len <= 0 || !g_net_range[0]) return 0;
+    char spec[64];
+    strncpy(spec, g_net_range, sizeof(spec) - 1);
+    spec[sizeof(spec) - 1] = '\0';
+    int prefix = 24;
+    char *slash = strchr(spec, '/');
+    if (slash) { *slash = '\0'; prefix = atoi(slash + 1); }
+    unsigned int a = 0, b = 0, c = 0, d = 0;
+    if (sscanf(spec, "%u.%u.%u.%u", &a, &b, &c, &d) != 4) return 0;
+    unsigned int ip = (a << 24) | (b << 16) | (c << 8) | d;
+    unsigned int mask;
+    if (prefix <= 0) mask = 0u;
+    else if (prefix >= 32) mask = 0xFFFFFFFFu;
+    else mask = 0xFFFFFFFFu << (32 - prefix);
+    unsigned int bc = (ip & mask) | ~mask;
+    snprintf(out, len, "%u.%u.%u.%u",
+             (bc >> 24) & 0xFF, (bc >> 16) & 0xFF, (bc >> 8) & 0xFF, bc & 0xFF);
+    return 1;
+}
+
+/* Probe'u multicast + alt ag broadcast + sinirli broadcast uzerinden yollar.
+ * Broadcast, multicast grup uyeligine girmeyen cihazlari da kapsar. */
+static void ws_send_probe(int fd, const char *msgid) {
+    char msg[2048];
+    snprintf(msg, sizeof(msg), WS_PROBE, msgid);
+    size_t mlen = strlen(msg);
+    if (mlen == 0 || mlen >= sizeof(msg)) return;
+
+    struct sockaddr_in dst;
+    memset(&dst, 0, sizeof(dst));
+    dst.sin_family = AF_INET;
+    dst.sin_port = htons(3702);
+
+    if (inet_pton(AF_INET, "239.255.255.250", &dst.sin_addr) == 1)
+        sendto(fd, msg, mlen, 0, (struct sockaddr *)&dst, sizeof(dst));
+
+    char bc[32];
+    if (net_broadcast_addr(bc, sizeof(bc)) && inet_pton(AF_INET, bc, &dst.sin_addr) == 1)
+        sendto(fd, msg, mlen, 0, (struct sockaddr *)&dst, sizeof(dst));
+
+    dst.sin_addr.s_addr = htonl(INADDR_BROADCAST);
+    sendto(fd, msg, mlen, 0, (struct sockaddr *)&dst, sizeof(dst));
+}
+
+/* Iki turlu toplama: 1) standart multicast Probe, 2) yeni MessageID ile
+ * multicast + broadcast. Ilk turu kaciran veya multicast grubuna girmeyen
+ * cihazlar ikinci turda yakalanir. */
+static int ws_discovery_gather(OnvifHit *hits, int max_hits, int wait_ms) {
+    if (!hits || max_hits <= 0) return 0;
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) return 0;
+
+    int one = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &one, sizeof(one));
+
+    struct sockaddr_in local;
+    memset(&local, 0, sizeof(local));
+    local.sin_family = AF_INET;
+    local.sin_addr.s_addr = htonl(INADDR_ANY);
+    local.sin_port = 0;
+    if (bind(fd, (struct sockaddr *)&local, sizeof(local)) < 0) { close(fd); return 0; }
+
+    struct ip_mreq mreq;
+    memset(&mreq, 0, sizeof(mreq));
+    inet_pton(AF_INET, "239.255.255.250", &mreq.imr_multiaddr);
+    mreq.imr_interface.s_addr = htonl(INADDR_ANY);
+    setsockopt(fd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq));
+
+    unsigned char ttl = 2;
+    setsockopt(fd, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof(ttl));
+
+    int r1_wait = (wait_ms * 2) / 5;
+    if (r1_wait < 600) r1_wait = 600;
+    if (r1_wait > wait_ms) r1_wait = wait_ms;
+
+    char mid[64];
+    ws_msgid(mid, sizeof(mid));
+    ws_send_probe(fd, mid);
+    int found = ws_collect(fd, hits, max_hits, 0, r1_wait);
+
+    if (found < max_hits) {
+        ws_msgid(mid, sizeof(mid));
+        ws_send_probe(fd, mid);
+        found = ws_collect(fd, hits, max_hits, found, wait_ms);
+    }
+
     close(fd);
     return found;
 }
@@ -870,9 +1138,25 @@ static int build_host_list(const char *target, char hosts[][MAX_IP_LEN],
 
 /* ========== Servis portları ========== */
 static const int k_probe_ports[] = {
-    554, 8554, 8555, 80, 8080, 81, 88, 8000, 8081, 37777, 34567, 8899, 9000, 443, 1024, 5000
+    554, 8554, 8555, 80, 8080, 81, 88, 8000, 8081, 37777, 34567, 8899, 9000,
+    443, 8443, 1024, 5000
 };
 #define PROBE_PORT_COUNT ((int)(sizeof(k_probe_ports)/sizeof(k_probe_ports[0])))
+
+/* Genisletilmis port turu: standart disi porta tasinmis RTSP/HTTP arayuzleri.
+ * Yalnizca MAC'i cozulen (agda gercekten var olan) hostlarda kosar. */
+static const int k_ext_ports[] = {
+    82, 83, 84, 85, 86, 87, 89,
+    555, 1054, 1554, 5544, 5554, 6554,
+    7070, 8556, 1935,
+    8082, 8083, 8084, 8085, 8086, 8087, 8088, 8089, 8090,
+    8181, 8282, 8888,
+    9001, 9002, 9008,
+    9999, 10000, 10001,
+    34568, 34599, 37778,
+    8200, 8300, 9527, 3388, 3000, 5001, 65001
+};
+#define EXT_PORT_COUNT ((int)(sizeof(k_ext_ports)/sizeof(k_ext_ports[0])))
 
 static int is_rtsp_port(int p) { return p == 554 || p == 8554 || p == 8555 || p == 10554; }
 static int is_http_port(int p) { return p == 80 || p == 8080 || p == 81 || p == 88 || p == 8081 || p == 8000 || p == 443 || p == 8443 || p == 5000 || p == 1024 || p == 9000; }
@@ -904,7 +1188,7 @@ static void probe_host(const char *ip) {
     }
 
     int open_any = 0;
-    int opened[PROBE_PORT_COUNT];
+    int opened[PROBE_PORT_COUNT + EXT_PORT_COUNT];
     int opened_count = 0;
 
     for (int i = 0; i < PROBE_PORT_COUNT; i++) {
@@ -916,6 +1200,24 @@ static void probe_host(const char *ip) {
             open_any = 1;
             if (opened_count < PROBE_PORT_COUNT) opened[opened_count++] = port;
             if (cam.port_count < CAM_MAX_PORTS) cam.ports[cam.port_count++] = port;
+        }
+    }
+
+    /* Genisletilmis port turu: yalnizca MAC'i cozulen (agda var olan) hostlarda.
+     * Standart disi porta tasinmis RTSP/HTTP arayuzlerini yakalar. */
+    int ext_n = 0;
+    int ext_opened[EXT_PORT_COUNT];
+    if (mac && !g_cancel) {
+        ext_n = tcp_sweep_fanout(ip, k_ext_ports, EXT_PORT_COUNT,
+                                 ext_opened, EXT_PORT_COUNT, 250);
+        if (ext_n > 0) {
+            open_any = 1;
+            for (int i = 0; i < ext_n; i++) {
+                if (opened_count < (int)(sizeof(opened) / sizeof(opened[0])))
+                    opened[opened_count++] = ext_opened[i];
+                if (cam.port_count < CAM_MAX_PORTS)
+                    cam.ports[cam.port_count++] = ext_opened[i];
+            }
         }
     }
 
@@ -966,6 +1268,55 @@ static void probe_host(const char *ip) {
     for (int i = 0; i < opened_count; i++) {
         if (is_vendor_port(opened[i])) { cam.evidence |= CAM_EV_VPORT; break; }
     }
+
+    /* Genisletilmis turda bulunan portlari siniflandir (RTSP -> HTTP sirasiyla) */
+    for (int i = 0; i < ext_n; i++) {
+        if (g_cancel) break;
+        int port = ext_opened[i];
+        if (is_rtsp_port(port) || is_http_port(port)) continue; /* standart turda islendi */
+        CameraDevice tmp;
+        memset(&tmp, 0, sizeof(tmp));
+        if (rtsp_probe(ip, port, &tmp)) {
+            cam.evidence |= CAM_EV_RTSP;
+            if (cam.rtsp_port == 0) {
+                cam.rtsp_port = port;
+                cam.rtsp_auth_required = tmp.rtsp_auth_required;
+                if (tmp.rtsp_realm[0])
+                    strncpy(cam.rtsp_realm, tmp.rtsp_realm, CAM_REALM_LEN - 1);
+            }
+            if (cam.rtsp_auth_required) cam.evidence |= CAM_EV_RTSP_AUTH;
+            if (cam.server_header[0] == '\0' && tmp.server_header[0])
+                strncpy(cam.server_header, tmp.server_header, CAM_SERVER_LEN - 1);
+            continue;
+        }
+        int r = http_probe(ip, port, &cam);
+        if (r == 2) {
+            cam.evidence |= CAM_EV_HTTP;
+            if (cam.http_port == 0) cam.http_port = port;
+        } else if (r == 1 && cam.http_port == 0) {
+            cam.http_port = port;
+        }
+    }
+
+    /* TLS sertifika sondasi (443/8443): sertifika O/CN/OU alanlarinda uretici izi */
+    for (int i = 0; i < opened_count; i++) {
+        int port = opened[i];
+        if (!is_https_port(port)) continue;
+        char subj[CAM_MODEL_LEN * 2] = {0};
+        char istr[CAM_MODEL_LEN * 2] = {0};
+        if (!tls_cert_probe(ip, port, subj, sizeof(subj), istr, sizeof(istr))) continue;
+        if (subj[0]) camera_discovery_log("TLS sertifikasi %s:%d - konu: %s", ip, port, subj);
+        if (cam.http_port == 0) cam.http_port = port;
+        char man[CAM_MODEL_LEN] = {0};
+        int thit = guess_manufacturer(subj, man, sizeof(man));
+        if (!thit) thit = guess_manufacturer(istr, man, sizeof(man));
+        if (thit) {
+            cam.evidence |= CAM_EV_TLS;
+            if (!cam.manufacturer[0] && man[0])
+                strncpy(cam.manufacturer, man, CAM_MODEL_LEN - 1);
+        }
+    }
+
     if (oui_cam) cam.evidence |= CAM_EV_OUI;
 
     /* HTTP device-info parmak izi (uretici/model/firmware) */
@@ -1014,11 +1365,13 @@ static void probe_host(const char *ip) {
     if (cam.evidence & CAM_EV_OUI)    score += 15;
     if (cam.evidence & CAM_EV_VPORT)  score += 10;
     if (cam.evidence & CAM_EV_RTSP_AUTH) score += 5;
+    if (cam.evidence & CAM_EV_TLS)    score += 8;
     if (score > 100) score = 100;
     cam.confidence = score;
 
     /* Kamera sayılmak için asgari kanıt: RTSP, ONVIF, HTTP imza, OUI veya üretici port */
-    unsigned cam_evidence = CAM_EV_RTSP | CAM_EV_ONVIF | CAM_EV_HTTP | CAM_EV_OUI | CAM_EV_VPORT;
+    unsigned cam_evidence = CAM_EV_RTSP | CAM_EV_ONVIF | CAM_EV_HTTP | CAM_EV_OUI |
+                            CAM_EV_VPORT | CAM_EV_TLS;
     if ((cam.evidence & cam_evidence) == 0) return; /* yalnız rastgele açık port: kamera değil */
 
     /* Kanıt metni */
@@ -1030,6 +1383,7 @@ static void probe_host(const char *ip) {
     if (cam.evidence & CAM_EV_ONVIF)     strcat(ev, "onvif,");
     if (cam.evidence & CAM_EV_OUI)       strcat(ev, "oui-uretici,");
     if (cam.evidence & CAM_EV_VPORT)     strcat(ev, "uretici-port,");
+    if (cam.evidence & CAM_EV_TLS)       strcat(ev, "tls-sertifika,");
     int el = (int)strlen(ev);
     if (el > 0 && ev[el-1] == ',') ev[el-1] = '\0';
     strncpy(cam.evidence_text, ev, CAM_EVIDENCE_LEN - 1);

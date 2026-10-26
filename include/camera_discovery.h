@@ -4,10 +4,12 @@
  * Yerel ağdaki IP kameralarını (RTSP / ONVIF / HTTP arayüzü / OUI) tespit eder.
  * Aktif yöntemler:
  *   1. Kamera imzalı TCP port taraması (554, 8554, 37777, 34567, 8000, ...)
- *   2. RTSP OPTIONS/DESCRIBE sondası (Server başlığı, 401 realm)
- *   3. HTTP web arayüzü sondası (Server başlığı + kamera imza kelimeleri)
- *   4. ONVIF WS-Discovery (UDP 239.255.255.250:3702 multicast Probe)
- *   5. MAC OUI veritabanı (bilinen kamera üreticileri)
+ *   2. Genişletilmiş port turu (standart dışı porta taşınmış arayüzler)
+ *   3. RTSP OPTIONS/DESCRIBE sondası (Server başlığı, 401 realm)
+ *   4. HTTP web arayüzü sondası (Server başlığı + kamera imza kelimeleri)
+ *   5. TLS sertifika sondası (443/8443, sertifika O/CN/OU içinde üretici)
+ *   6. ONVIF WS-Discovery (iki tur: multicast + broadcast, UDP 3702)
+ *   7. MAC OUI veritabanı (bilinen kamera üreticileri)
  *
  * Sonuçlar, kamera başına kanıt maskesi ve 0-100 güven skoru ile raporlanır.
  */
@@ -36,7 +38,8 @@ enum {
     CAM_EV_HTTP      = 1u << 3,   /* HTTP kamera web arayüzü imzası */
     CAM_EV_ONVIF     = 1u << 4,   /* ONVIF WS-Discovery yanıtı */
     CAM_EV_OUI       = 1u << 5,   /* MAC OUI -> bilinen kamera üreticisi */
-    CAM_EV_VPORT     = 1u << 6    /* üreticiye özel port (37777, 34567, 8000...) */
+    CAM_EV_VPORT     = 1u << 6,   /* üreticiye özel port (37777, 34567, 8000...) */
+    CAM_EV_TLS       = 1u << 7    /* TLS sertifikasında üretici izi (443/8443) */
 };
 
 /* ========== Kamera Kaydı ========== */

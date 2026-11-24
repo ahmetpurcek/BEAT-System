@@ -101,3 +101,4 @@ target_link_libraries(beat_system PRIVATE m dl)
 
 message(STATUS "Platform: ${CMAKE_SYSTEM_NAME}")
 message(STATUS "Derleyici: ${CMAKE_C_COMPILER}")
+

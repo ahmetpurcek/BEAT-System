@@ -64,7 +64,7 @@ static int   sb_test_raw_ok = 0;
  *   Cekirdek (iptables) deterministik katman — durum
  * ================================================================== */
 #define SB_FW_CHAIN "BEAT_SB"
-#define SB_FW_MAX   1024
+#define SB_FW_MAX   4096
 
 enum { SB_FW_KIND_IP = 0, SB_FW_KIND_DNS = 1 };
 

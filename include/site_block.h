@@ -22,7 +22,7 @@
 
 #include "network_monitor.h"
 
-#define SB_MAX_RULES 256
+#define SB_MAX_RULES 1024
 #define SB_DOMAIN_LEN MAX_DOMAIN_LEN
 #define SB_IP_LEN     MAX_IP_LEN
 #define SB_OBS_MAX    2048

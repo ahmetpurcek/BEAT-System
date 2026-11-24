@@ -182,40 +182,66 @@ Uygulama üç ana sekmeden oluşur:
      **ANLIK GÖRÜNTÜ**, **KAYIT**, **OTONOM ERİŞ** (varsayılan kimlik +
      zafiyet yolları), **PARMAK İZİ + ONVIF**, **ZAFİYET SONDASI** ve elle
      kullanıcı/parola girişi. Dashboard'daki `KAMERA LİSTESİ` ile **aynı**
-     listeyi paylaşır (tek doğruluk kaynağı `gui_camera.c`).
+     listeyi paylaşır (tek doğruluk kaynağı `gui.c` içindeki kamera durumu).
 
 ---
 
 ## 4. Bağımlılıkların Kurulumu (Kali Linux)
+
+Derleme; `raylib`, `glfw3`, `libpcap`, OpenGL, `libcrypt` (`crypt.h`) ve
+pthread ister. OpenSSL önerilir ama yoksa yapılandırma durmaz. `ffmpeg`,
+`iptables` ve `ip` yalnız çalışma zamanındadır.
 
 ```bash
 # 1. Paket listesini güncelle
 sudo apt update && sudo apt upgrade -y
 
 # 2. Derleme araçları
+#    build-essential: gcc, libc6-dev, pthread, libm
 sudo apt install -y build-essential cmake pkg-config git
 
-# 3. libpcap (paket yakalama)
+# 3. Paket yakalama
 sudo apt install -y libpcap-dev
 
-# 4. OpenGL ve X11 başlıkları (Raylib için zorunlu)
+# 4. Raylib pencere ve grafik yığını
+#    libglfw3-dev: raylib.pc Requires.private glfw3.
+#    Paylaşılan libraylib çalışma anında libglfw3'e bağlıdır; statik
+#    raylib ve kaynaktan derleme ise glfw3.pc + başlıkları ister.
+#    libgl / X11 başlıkları CMake find_package(OpenGL/X11) ve raylib
+#    kaynağı içindir.
 sudo apt install -y libgl1-mesa-dev libgles2-mesa-dev \
     libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev \
-    libxi-dev libxext-dev
+    libxi-dev libxext-dev \
+    libglfw3-dev \
+    libraylib-dev
 
-# 5. Raylib
-sudo apt install -y libraylib-dev
+# 5. libcrypt (libxcrypt) — zorunlu
+#    sentinel_fw.c crypt(3) + crypt.h kullanır (firmware /etc/passwd
+#    DES/MD5/SHA hash doğrulaması). Güncel glibc crypt() sağlamaz;
+#    paket yoksa bağlama aşaması kırılır.
+sudo apt install -y libcrypt-dev
 
-# 6. (Önerilen) QUIC SNI çözümleme + kamera TLS sondası için OpenSSL
+# 6. (Önerilen) QUIC SNI çözümleme + kamera TLS sondası
 sudo apt install -y libssl-dev
 
-# 7. (Kamera izleme için) ffmpeg/ffprobe
-#    RTSP/MJPEG akışını uygulama-içinde çözmek için kullanılır.
-#    Yoksa keşif/erişim çalışır ama canlı görüntü açılamaz.
-sudo apt install -y ffmpeg
+# 7. Çalışma zamanı araçları (derlemeyi engellemez)
+#    ffmpeg   — RTSP/MJPEG canlı izleme, snapshot, kayıt, erişim sondası
+#    iptables — site karartmanın BEAT_SB DROP zinciri
+#    iproute2 — `ip route` / `ip neigh` (keşif ve varsayılan arayüz)
+sudo apt install -y ffmpeg iptables iproute2
 ```
 
-**Raylib depoda yoksa** kaynak koddan derleyin:
+**İsteğe bağlı — çevrimdışı firmware açma** (`./build/beat_system --sentinel-fw <imaj>`).
+Araç yoksa ilgili katman raporda atlanır; derleme etkilenmez:
+
+```bash
+sudo apt install -y binwalk squashfs-tools e2fsprogs
+# binwalk, unsquashfs (squashfs-tools), debugfs (e2fsprogs)
+# tar, gzip ve cpio zaten temel sistemde bulunur
+```
+
+**Raylib depoda yoksa** kaynak koddan derleyin. Yukarıdaki GLFW, OpenGL ve X11
+paketleri bu derlemenin de girdisidir:
 
 ```bash
 git clone --depth 1 --branch 5.5 https://github.com/raysan5/raylib.git /tmp/raylib-src
@@ -231,18 +257,23 @@ cd ~
 Kurulumu doğrulayın:
 
 ```bash
-pkg-config --modversion raylib    # örn. 5.5.0
-pkg-config --modversion libpcap   # örn. 1.10.5
+pkg-config --modversion raylib    # örn. 6.2.0
+pkg-config --modversion glfw3     # örn. 3.5.1
+pkg-config --modversion libpcap   # örn. 1.11.0
 pkg-config --modversion openssl   # opsiyonel
-ffmpeg -version                   # kamera izleme için (runtime)
+test -f /usr/include/crypt.h && echo "crypt.h: var"
+ffmpeg -version                   # kamera izleme (çalışma zamanı)
+iptables --version                # site karartma DROP katmanı
+ip -V                             # iproute2
 ```
 
-> CMake, `raylib` ve `libpcap` için `pkg-config` kullanır. Yukarıdaki
-> `.pc` dosyaları bulunabiliyorsa derleme sorunsuz geçer. OpenSSL bulunamazsa
-> `quic_sni.c` derlemeden çıkar (ICMP fallback devreye girer) + kamera HTTPS
-> sondası devre dışı kalır (Basic/Digest/ONVIF yine çalışır) — derleme yine de
-> başarılı olur. **ffmpeg derleme için gerekmez**; yalnızca canlı izleme/kayıt/
-> snapshot çalışma zamanında çağrılır ve yokluğu arayüzde bildirilir.
+> CMake `raylib`, `glfw3` ve `libpcap` için `pkg-config` kullanır; `libcrypt`
+> için `crypt.h` ve `libcrypt` arar. Bu dördü yoksa yapılandırma durur.
+> OpenSSL bulunamazsa `quic_sni.c` yine derlenir ama `HAVE_OPENSSL` tanımsız
+> kalır: QUIC SNI ve kamera HTTPS sondası kapanır, Basic/Digest/ONVIF çalışmaya
+> devam eder. **ffmpeg, iptables ve ip derleme için gerekmez**; eksiklikleri
+> CMake yalnızca durum satırı olarak yazar, ilgili özellik çalışma anında
+> sınırlı kalır.
 
 ---
 
@@ -257,11 +288,16 @@ cmake --build build -j$(nproc)
 
 Çıktı: **`build/beat_system`**
 
-Derleme sırasında konsol, OpenSSL bulunup bulunmadığını ve platform
-bilgisini bildirir:
+Derleme sırasında konsol, bulunan kütüphaneleri ve çalışma zamanı
+araçlarını bildirir:
 
 ```
+-- GLFW bulundu: 3.5.1 (raylib pencere arka ucu)
 -- OpenSSL bulundu: QUIC SNI cozumleme + kamera TLS sondasi aktif
+-- libcrypt bulundu: /usr/lib/x86_64-linux-gnu/libcrypt.so
+-- ffmpeg bulundu: /usr/bin/ffmpeg (canli izleme / kayit / snapshot)
+-- iptables bulundu: /usr/sbin/iptables (site karartma BEAT_SB zinciri)
+-- ip bulundu: /usr/sbin/ip (ip route / ip neigh)
 -- Platform: Linux
 -- Derleyici: /usr/bin/cc
 ```
@@ -337,6 +373,16 @@ sudo ./build/beat_system --headless \
 
 Çıkışta özet basılır: işlenen paket, toplam uyarı, bastırılan yanlış-pozitif,
 aktif izleyici sayısı.
+
+### 6.4 Çevrimdışı firmware (`--sentinel-fw`)
+
+GUI açmadan bir firmware imajını açar, hash doğrular (`crypt(3)`) ve bulguları
+yazar. Ağ keşfi veya root gerekmez. Squashfs / ext katmanları için isteğe
+bağlı `unsquashfs`, `debugfs` ve `binwalk` kullanılır; yoksa o katman atlanır.
+
+```bash
+./build/beat_system --sentinel-fw /path/to/firmware.dav
+```
 
 ---
 
@@ -426,7 +472,7 @@ içinde** çizilir (meterpreter tarzı tek pencere).
 | Canlı paket yakalama | `AF_PACKET` / `libpcap` ham soket erişimi |
 | Raw port taramaları | SYN/FIN/NULL/Xmas/ACK gibi yarı-açık taramalar ham TCP üretir |
 | ARP black-hole | Ham ARP çerçevesi enjeksiyonu |
-| Site karartma | Ham enjeksiyon + `iptables` (`BEAT_SB` zinciri) yönetimi |
+| Site karartma | Ham enjeksiyon + `iptables` (`BEAT_SB` zinciri) yönetimi (`iptables` paketi) |
 | QUIC ICMP fallback | Ham `AF_INET` soketi ile ICMP üretimi |
 | Kamera ARP keşfi | Ham ARP süpürmesi (root olmadan `/proc/net/arp` / `ip neigh` fallback) |
 
@@ -459,12 +505,12 @@ BEAT-System/
 │   ├── camera_access.h         # Otonom erişim motoru (yol keşfi, kimlik denemesi, snapshot)
 │   ├── camera_vuln.h           # Parmak izi + zafiyet sondaları + ONVIF istemcisi + kimlik DB
 │   ├── video_stream.h          # Uygulama-içi RTSP/MJPEG izleme (ffmpeg → raylib texture)
-│   ├── gui_camera.h            # Kamera GUI modülü arayüzü (Dashboard paneli + Araçlar sekmesi)
+│   ├── sentinel.h              # SENTINEL faz motoru (firmware analizi dahil)
 │   └── gui.h                   # GUI modülü arayüzü ve tema paleti
 ├── lib/
 │   └── raygui.h                # Raygui (header-only)
 ├── src/
-│   ├── main.c                  # Giriş noktası: GUI + headless modlar
+│   ├── main.c                  # Giriş: GUI, --headless, --sentinel-fw
 │   ├── platform.c              # Thread / mutex / arayüz soyutlamaları
 │   ├── utils.c                 # Yardımcı fonksiyonlar
 │   ├── arp_scanner.c           # Ağ keşfi (raw ARP / /proc/net/arp / ip neigh)
@@ -474,23 +520,20 @@ BEAT-System/
 │   ├── network_ids.c           # IDS kuralları, akış/host tablosu, skorlama
 │   ├── filter_engine.c         # Display filtre ayrıştırıcı
 │   ├── raw_inject.c            # Ham kare kurucu/gönderici + checksum
-│   ├── quic_sni.c              # QUIC SNI çözücü (OpenSSL)
+│   ├── quic_sni.c              # QUIC SNI çözücü (OpenSSL varsa)
 │   ├── site_block.c            # Site karartma + iptables katmanı
 │   ├── cam_net.c               # Kamera ağ/kripto altyapısı (saf-C MD5/SHA1/HMAC, HTTP, Digest)
 │   ├── camera_discovery.c      # Kamera keşfi: ARP+port+RTSP+HTTP+ONVIF+SSDP/mDNS+OUI, self/gateway dışlama
 │   ├── camera_access.c         # Otonom erişim: yol keşfi, varsayılan/elle kimlik, arka plan işçi
 │   ├── camera_vuln.c           # Parmak izi, Hikvision/Dahua/Xiongmai sondaları, ONVIF, wordlist
 │   ├── video_stream.c          # Görünmez ffmpeg alt-süreci → RGB kare → Texture2D; kayıt/reconnect
-│   ├── gui_camera.c            # Kamera GUI modülü (Dashboard paneli + Araçlar▸Kameralar)
-│   └── gui.c                   # Raylib/Raygui arayüz (3 sekme)
-├── testbed/                    # Kamera modülü yazılım testbedi (mediamtx + MJPEG)
-│   ├── start.sh / stop.sh      # Testbed başlat/durdur (ffprobe ile doğrulama)
-│   ├── mediamtx-open.yml       # Açık RTSP sunucusu yapılandırması
-│   ├── mediamtx-auth.yml       # Korumalı RTSP sunucusu (kimlik testi)
-│   ├── mjpeg_server.py         # MJPEG-over-HTTP sahte kamera
-│   ├── test_camera_discovery.c # Keşif motoru bağımsız testi
-│   └── README.md               # Testbed kamera haritası ve kullanımı
-└── assets/fonts/               # GUI yazı tipleri
+│   ├── sentinel_core.c         # SENTINEL orkestrasyon ve durum
+│   ├── sentinel_fw.c           # Firmware açma + crypt(3) hash doğrulama
+│   ├── sentinel_proto.c        # Protokol mantık kontrolleri
+│   ├── sentinel_fuzz.c         # Yapı-farkındalıklı fuzz
+│   ├── sentinel_exploit.c      # Exploit / karar motoru
+│   └── gui.c                   # Raylib/Raygui arayüz (3 sekme + kamera yüzeyi)
+└── assets/fonts/               # GUI yazı tipi (Roboto-Regular.ttf)
 ```
 
 > `build/` dizini derleme çıktısıdır ve sürüm kontrolüne dahil edilmez.
@@ -507,11 +550,12 @@ BEAT-System/
 - **ARP black-hole MITM değildir:** trafik yönlendirilmez, yalnızca hedefin
   ARP tablosu zehirlenir; kaldırma işlemi doğru ARP Reply'ları ile anında
   geri alınır (ARP zaten 30–60 sn içinde kendiliğinden düzelir).
-- **Kamera hattı — sahada uçtan uca test:** keşif/erişim/izleme kod yolu
-  derlenmiş ve GUI render'ı doğrulanmıştır; ancak gerçek kamera karşısında
-  uçtan uca (bul → auth → stream) doğrulama için `testbed/` kullanılmalıdır.
-  Farklı marka/firmware'lerde başarı; kameranın sertleştirme durumuna, kimlik
-  politikasına ve ağ segmentasyonuna bağlıdır.
+- **Kamera hattı:** keşif, erişim ve izleme aynı pencerede çalışır. Canlı
+  görüntü `ffmpeg`'e bağlıdır. Marka ve firmware farkı, sertleştirme, kimlik
+  politikası ve ağ segmentasyonu başarıyı belirler.
+- **Firmware açma:** `--sentinel-fw` hash doğrulaması için `libcrypt` ile
+  derlenir. `binwalk` / `unsquashfs` / `debugfs` yoksa ilgili katman açılmaz
+  ve raporda atlanmış görünür.
 - **TLS sondası:** HTTPS/ONVIF-over-TLS denemeleri yalnızca OpenSSL derlemede
   tanımlıysa çalışır; aksi halde HTTPS adımı atlanır (Basic/Digest/RTSP yine
   denenir).

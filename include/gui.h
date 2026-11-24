@@ -52,6 +52,7 @@ typedef enum {
     TAB_DASHBOARD = 0,
     TAB_SECURITY,
     TAB_TOOLS,
+    TAB_SITE_BLOCK, /* Site Karartma (ust seviye sekme) */
     TAB_SENTINEL,   /* SENTINEL v2 — otonom kamera istismar hatti */
     TAB_COUNT
 } GuiTab;

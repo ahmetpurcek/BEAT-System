@@ -53,7 +53,7 @@ static PortScanResults g_portscan;
 static float g_scroll_nm_flows = 0;
 static float g_scroll_device_detail = 0;
 
-static int g_tools_subtab = 0;         /* 0=Paket Izleme, 1=Site Karartma, 2=Port Tarayici */
+static int g_tools_subtab = 0;         /* 0=Paket Izleme, 1=Port Tarayici */
 static float g_scroll_tool_ports = 0;
 static int g_selected_packet_num = -1;
 static float g_scroll_pdu_detail = 0;
@@ -71,50 +71,47 @@ static ArpBlockSnapshot g_arp_block;     /* Agdan Kesme (ARP) engel listesi */
 static float g_scroll_blk = 0;           /* engellenen cihazlar listesi scroll */
 static char g_nm_target[MAX_IP_LEN] = {0}; /* network monitor secili hedef */
 
-/* ========== Site Karartma (ARAC-03) — toplu islem modeli ========== */
-#define SB_UI_MAX_SITES   16
-#define SB_UI_MAX_EXP_DOM 64
-#define SB_UI_MAX_EXP_IP  128
-#define SB_UI_SEL_MAX     128
+/* ========== Site Karartma ========== */
+#define SB_UI_SEL_MAX 128
 
-static char  g_sb_domain[SB_DOMAIN_LEN] = {0};   /* alan adi giris kutusu */
-static int   g_sb_domain_active = 0;             /* kutu odakli mi */
-static int   g_sb_mode = SB_MODE_BOTH;           /* mod secimi */
+static int   g_sb_subtab = 0;             /* 0=karartma 1=ziyaretler */
+static char  g_sb_domain[SB_DOMAIN_LEN] = {0};
+static int   g_sb_domain_active = 0;
+static int   g_sb_mode = SB_MODE_BOTH;
 static char  g_sb_sinkhole[SB_IP_LEN] = "0.0.0.0";
 static int   g_sb_sinkhole_active = 0;
 
-/* Isleme alinacak site listesi (birden fazla alan adi) */
-static char  g_sb_sites[SB_UI_MAX_SITES][SB_DOMAIN_LEN];
-static int   g_sb_site_count = 0;
-static float g_sb_scroll_sites = 0;
-
-/* IP coklu secim + kalici istisna listesi (uygulamada atlanir) */
+/* Sol liste: IP secimi */
 static char  g_sb_sel_ips[SB_UI_SEL_MAX][MAX_IP_LEN];
 static int   g_sb_sel_count = 0;
-static char  g_sb_exc_ips[SB_UI_SEL_MAX][MAX_IP_LEN];
-static int   g_sb_exc_count = 0;
-static int   g_sb_joker_sel = 0;           /* "*" (tum IP'ler) secili mi */
 static char  g_sb_ip_filter[64] = {0};
 static int   g_sb_ip_filter_active = 0;
 static float g_sb_scroll_ips = 0;
+static char  g_sb_open_ip[MAX_IP_LEN] = {0};
 
-/* Envanter gorunumu (siteye / IP'ye gore) */
-static char  g_sb_inv_filter[64] = {0};
-static int   g_sb_inv_filter_active = 0;
-static int   g_sb_inv_view = 0;            /* 0=siteye gore, 1=IP'ye gore */
-static float g_sb_scroll_inv = 0;
-static float g_sb_scroll_obs = 0;
-static char  g_sb_exp_dom[SB_UI_MAX_EXP_DOM][SB_DOMAIN_LEN];
-static int   g_sb_exp_dom_count = 0;
-static char  g_sb_exp_ip[SB_UI_MAX_EXP_IP][MAX_IP_LEN];
-static int   g_sb_exp_ip_count = 0;
-static char  g_sb_confirm_key[160] = {0};  /* iki adimli toplu silme onayi */
-static double g_sb_confirm_ts = 0;
-static char  g_sb_status[192] = {0};       /* panel ici geri bildirim */
+/* Sag liste: site -> banli IP'ler */
+static char  g_sb_dom_filter[64] = {0};
+static int   g_sb_dom_filter_active = 0;
+static float g_sb_scroll_doms = 0;
+static char  g_sb_open_dom[SB_DOMAIN_LEN] = {0};
+static char  g_sb_unb_ips[SB_UI_SEL_MAX][MAX_IP_LEN];
+static int   g_sb_unb_count = 0;
+
+/* Ziyaretler */
+static char  g_sb_vis_filter[64] = {0};
+static int   g_sb_vis_filter_active = 0;
+static float g_sb_scroll_vis = 0;
+static int   g_sb_vis_sel = 0;
+static int   g_sb_vis_open = 0;
+static float g_sb_vis_dd_scroll = 0;
+
+static char  g_sb_status[224] = {0};
 static double g_sb_status_ts = 0;
-static SiteBlockRule g_sb_rules_snap[SB_MAX_RULES];
 
-/* Toplu kural isleme isi (arka plan thread'i; arayuz kilitlenmez) */
+static SiteBlockRule g_sb_rules_snap[SB_MAX_RULES];
+static int g_sb_snap_n = 0;
+static char g_sb_dom_list[SB_MAX_RULES][SB_DOMAIN_LEN];
+
 typedef struct {
   char ip[SB_IP_LEN];
   char domain[SB_DOMAIN_LEN];
@@ -137,7 +134,6 @@ typedef struct {
   SbUiOp *ops;
   char current[SB_IP_LEN + SB_DOMAIN_LEN + 8];
   double started;
-  double ended;
 } SbUiJob;
 
 static SbUiJob g_sb_job = { .lock = PTHREAD_MUTEX_INITIALIZER };
@@ -1065,7 +1061,8 @@ static void draw_tabs(int W) {
   DrawRectangle(0, y, W, 32, (Color){7, 9, 15, 255});
   DrawRectangle(0, y + 31, W, 1, ui_alpha(COLOR_BORDER, 120));
 
-  const char *labels[] = {"Kontrol Paneli", "Alarm Merkezi", "Araçlar", "SENTINEL"};
+  const char *labels[] = {"Kontrol Paneli", "Alarm Merkezi", "Araçlar",
+                            "Site Karartma", "SENTINEL"};
   int tx = 12;
   for (int i = 0; i < (int)TAB_COUNT; i++) {
     int tw = MeasureText(labels[i], 13) + 30;
@@ -2064,10 +2061,7 @@ static void draw_panel_security(int W, int H) {
 
 
 
-/* ==================================================================
- *   Site Karartma — toplu islem yardimcilari
- * ================================================================== */
-
+/* ------------------------------------------------------------------ */
 static void sbui_status_set(const char *msg) {
   if (!msg) msg = "";
   strncpy(g_sb_status, msg, sizeof(g_sb_status) - 1);
@@ -2101,26 +2095,9 @@ static void sbui_lower(char *s) {
 static int sbui_ci_contains(const char *hay, const char *needle) {
   if (!hay || !needle || !needle[0]) return 1;
   size_t nl = strlen(needle);
-  for (const char *p = hay; *p; p++) {
+  for (const char *p = hay; *p; p++)
     if (strncasecmp(p, needle, nl) == 0) return 1;
-  }
   return 0;
-}
-
-static int sbui_ip_cmp(const char *a, const char *b) {
-  if (!a || !b) return 0;
-  if (strcmp(a, "*") == 0 || strcmp(b, "*") == 0) {
-    if (strcmp(a, "*") == 0 && strcmp(b, "*") == 0) return 0;
-    return (strcmp(a, "*") == 0) ? -1 : 1;
-  }
-  struct in_addr ia4, ib4;
-  if (inet_pton(AF_INET, a, &ia4) == 1 && inet_pton(AF_INET, b, &ib4) == 1) {
-    uint32_t x = ntohl(ia4.s_addr), y = ntohl(ib4.s_addr);
-    if (x < y) return -1;
-    if (x > y) return 1;
-    return 0;
-  }
-  return strcmp(a, b);
 }
 
 static int sbui_in_monitor(const char *ip) {
@@ -2155,32 +2132,27 @@ static void sbui_sel_del(const char *ip) {
   }
 }
 
-static int sbui_exc_has(const char *ip) {
-  for (int i = 0; i < g_sb_exc_count; i++)
-    if (strcmp(g_sb_exc_ips[i], ip) == 0) return 1;
+static int sbui_unb_has(const char *ip) {
+  for (int i = 0; i < g_sb_unb_count; i++)
+    if (strcmp(g_sb_unb_ips[i], ip) == 0) return 1;
   return 0;
 }
 
-static int sbui_exc_add(const char *ip) {
-  if (!ip || !ip[0] || sbui_exc_has(ip)) return 0;
-  if (g_sb_exc_count >= SB_UI_SEL_MAX) return -1;
-  strncpy(g_sb_exc_ips[g_sb_exc_count], ip, MAX_IP_LEN - 1);
-  g_sb_exc_ips[g_sb_exc_count][MAX_IP_LEN - 1] = '\0';
-  g_sb_exc_count++;
-  return 1;
-}
-
-static void sbui_exc_del(const char *ip) {
-  for (int i = 0; i < g_sb_exc_count; i++) {
-    if (strcmp(g_sb_exc_ips[i], ip) != 0) continue;
-    for (int k = i; k < g_sb_exc_count - 1; k++)
-      strcpy(g_sb_exc_ips[k], g_sb_exc_ips[k + 1]);
-    g_sb_exc_count--;
+static void sbui_unb_toggle(const char *ip) {
+  for (int i = 0; i < g_sb_unb_count; i++) {
+    if (strcmp(g_sb_unb_ips[i], ip) != 0) continue;
+    for (int k = i; k < g_sb_unb_count - 1; k++)
+      strcpy(g_sb_unb_ips[k], g_sb_unb_ips[k + 1]);
+    g_sb_unb_count--;
     return;
   }
+  if (g_sb_unb_count >= SB_UI_SEL_MAX) return;
+  strncpy(g_sb_unb_ips[g_sb_unb_count], ip, MAX_IP_LEN - 1);
+  g_sb_unb_ips[g_sb_unb_count][MAX_IP_LEN - 1] = '\0';
+  g_sb_unb_count++;
 }
 
-static void sbui_prune_lists(void) {
+static void sbui_prune_sel(void) {
   int w = 0;
   for (int i = 0; i < g_sb_sel_count; i++) {
     if (!sbui_in_monitor(g_sb_sel_ips[i])) continue;
@@ -2188,13 +2160,6 @@ static void sbui_prune_lists(void) {
     w++;
   }
   g_sb_sel_count = w;
-  w = 0;
-  for (int i = 0; i < g_sb_exc_count; i++) {
-    if (!sbui_in_monitor(g_sb_exc_ips[i])) continue;
-    if (w != i) strcpy(g_sb_exc_ips[w], g_sb_exc_ips[i]);
-    w++;
-  }
-  g_sb_exc_count = w;
 }
 
 static int sbui_sel_count_cur(void) {
@@ -2204,132 +2169,50 @@ static int sbui_sel_count_cur(void) {
   return n;
 }
 
-static int sbui_eff_count(void) {
-  if (g_sb_joker_sel) return 1;
-  int n = 0;
-  for (int i = 0; i < g_mon_count; i++)
-    if (sbui_sel_has(g_mon_ips[i]) && !sbui_exc_has(g_mon_ips[i])) n++;
+static int sbui_snap_rules(void) {
+  int n = 0, rc = site_block_rule_count();
+  if (rc > SB_MAX_RULES) rc = SB_MAX_RULES;
+  for (int i = 0; i < rc && n < SB_MAX_RULES; i++)
+    if (site_block_get_rule(i, &g_sb_rules_snap[n]) == 0) n++;
+  g_sb_snap_n = n;
   return n;
 }
 
-static int sbui_eff_ips(char out[][MAX_IP_LEN], int max) {
-  if (max <= 0) return 0;
-  if (g_sb_joker_sel) {
-    strncpy(out[0], "*", MAX_IP_LEN - 1);
-    out[0][MAX_IP_LEN - 1] = '\0';
-    return 1;
-  }
+static int sbui_ip_site_count(const char *ip) {
   int n = 0;
-  for (int i = 0; i < g_mon_count && n < max; i++) {
-    const char *ip = g_mon_ips[i];
-    if (!sbui_sel_has(ip) || sbui_exc_has(ip)) continue;
-    strncpy(out[n], ip, MAX_IP_LEN - 1);
-    out[n][MAX_IP_LEN - 1] = '\0';
-    n++;
-  }
+  for (int i = 0; i < g_sb_snap_n; i++)
+    if (strcmp(g_sb_rules_snap[i].ip, ip) == 0) n++;
   return n;
 }
 
-static void sbui_set_joker(int on) {
-  g_sb_joker_sel = on ? 1 : 0;
-  if (g_sb_joker_sel) {
-    g_sb_sel_count = 0;
-    g_sb_exc_count = 0;
+static int sbui_dom_ip_count(const char *dom) {
+  int n = 0;
+  for (int i = 0; i < g_sb_snap_n; i++)
+    if (strcmp(g_sb_rules_snap[i].domain, dom) == 0) n++;
+  return n;
+}
+
+static int sbui_cmp_str(const void *a, const void *b) {
+  return strcmp((const char *)a, (const char *)b);
+}
+
+static int sbui_dom_list_build(void) {
+  int n = sbui_snap_rules();
+  int c = 0;
+  for (int i = 0; i < n; i++) {
+    int f = 0;
+    for (int k = 0; k < c; k++)
+      if (strcmp(g_sb_dom_list[k], g_sb_rules_snap[i].domain) == 0) { f = 1; break; }
+    if (f) continue;
+    strncpy(g_sb_dom_list[c], g_sb_rules_snap[i].domain, SB_DOMAIN_LEN - 1);
+    g_sb_dom_list[c][SB_DOMAIN_LEN - 1] = '\0';
+    c++;
   }
+  qsort(g_sb_dom_list, (size_t)c, SB_DOMAIN_LEN, sbui_cmp_str);
+  return c;
 }
 
-static int sbui_site_index(const char *d) {
-  for (int i = 0; i < g_sb_site_count; i++)
-    if (strcmp(g_sb_sites[i], d) == 0) return i;
-  return -1;
-}
-
-static int sbui_site_add(const char *raw) {
-  char t[SB_DOMAIN_LEN];
-  strncpy(t, raw ? raw : "", sizeof(t) - 1);
-  t[sizeof(t) - 1] = '\0';
-  sbui_trim(t);
-  if (!t[0]) return 0;
-  sbui_lower(t);
-  if (sbui_site_index(t) >= 0) return 0;
-  if (g_sb_site_count >= SB_UI_MAX_SITES) return -1;
-  strncpy(g_sb_sites[g_sb_site_count], t, SB_DOMAIN_LEN - 1);
-  g_sb_sites[g_sb_site_count][SB_DOMAIN_LEN - 1] = '\0';
-  g_sb_site_count++;
-  return 1;
-}
-
-static int sbui_parse_sites(const char *input) {
-  char tmp[SB_DOMAIN_LEN];
-  strncpy(tmp, input ? input : "", sizeof(tmp) - 1);
-  tmp[sizeof(tmp) - 1] = '\0';
-  int added = 0, overflow = 0;
-  char *p = tmp;
-  while (*p) {
-    char *start = p;
-    while (*p && *p != ',' && *p != ';' && *p != '\n') p++;
-    char save = *p;
-    *p = '\0';
-    int r = sbui_site_add(start);
-    if (r > 0) added++;
-    else if (r < 0) overflow = 1;
-    if (!save) break;
-    p++;
-  }
-  return overflow ? -1 : added;
-}
-
-static int sbui_exp_has_dom(const char *k) {
-  for (int i = 0; i < g_sb_exp_dom_count; i++)
-    if (strcmp(g_sb_exp_dom[i], k) == 0) return 1;
-  return 0;
-}
-
-static int sbui_exp_has_ip(const char *k) {
-  for (int i = 0; i < g_sb_exp_ip_count; i++)
-    if (strcmp(g_sb_exp_ip[i], k) == 0) return 1;
-  return 0;
-}
-
-static void sbui_exp_toggle(const char *k) {
-  if (!k || !k[0]) return;
-  if (g_sb_inv_view == 0) {
-    for (int i = 0; i < g_sb_exp_dom_count; i++) {
-      if (strcmp(g_sb_exp_dom[i], k) != 0) continue;
-      for (int x = i; x < g_sb_exp_dom_count - 1; x++)
-        strcpy(g_sb_exp_dom[x], g_sb_exp_dom[x + 1]);
-      g_sb_exp_dom_count--;
-      return;
-    }
-    if (g_sb_exp_dom_count >= SB_UI_MAX_EXP_DOM) return;
-    strncpy(g_sb_exp_dom[g_sb_exp_dom_count], k, SB_DOMAIN_LEN - 1);
-    g_sb_exp_dom[g_sb_exp_dom_count][SB_DOMAIN_LEN - 1] = '\0';
-    g_sb_exp_dom_count++;
-  } else {
-    for (int i = 0; i < g_sb_exp_ip_count; i++) {
-      if (strcmp(g_sb_exp_ip[i], k) != 0) continue;
-      for (int x = i; x < g_sb_exp_ip_count - 1; x++)
-        strcpy(g_sb_exp_ip[x], g_sb_exp_ip[x + 1]);
-      g_sb_exp_ip_count--;
-      return;
-    }
-    if (g_sb_exp_ip_count >= SB_UI_MAX_EXP_IP) return;
-    strncpy(g_sb_exp_ip[g_sb_exp_ip_count], k, MAX_IP_LEN - 1);
-    g_sb_exp_ip[g_sb_exp_ip_count][MAX_IP_LEN - 1] = '\0';
-    g_sb_exp_ip_count++;
-  }
-}
-
-static int sbui_is_expanded(const char *k) {
-  if (g_sb_inv_view == 0) return sbui_exp_has_dom(k);
-  return sbui_exp_has_ip(k);
-}
-
-static const char *sbui_group_key(const SiteBlockRule *r) {
-  return (g_sb_inv_view == 0) ? r->domain : r->ip;
-}
-
-/* ---- Arka plan toplu islem isi ---- */
+/* ---- Arka plan islem ---- */
 static void *sbui_job_worker(void *arg) {
   SbUiJob *j = (SbUiJob *)arg;
   for (int i = 0; i < j->total; i++) {
@@ -2381,20 +2264,18 @@ static int sbui_job_launch(SbUiOp *ops, int total, int op, int mode) {
   g_sb_job.done = 0;
   g_sb_job.active = 1;
   g_sb_job.started = GetTime();
-  g_sb_job.ended = 0;
   g_sb_job.current[0] = '\0';
 
-  int rc = pthread_create(&g_sb_job.th, NULL, sbui_job_worker, &g_sb_job);
-  if (rc != 0) {
+  if (pthread_create(&g_sb_job.th, NULL, sbui_job_worker, &g_sb_job) != 0) {
     free(ops);
     g_sb_job.ops = NULL;
     g_sb_job.active = 0;
     g_sb_job.total = 0;
-    sbui_status_set("Arka plan islemi baslatilamadi.");
+    sbui_status_set("Islem baslatilamadi.");
     return -1;
   }
   g_sb_job.thread_live = 1;
-  sbui_statusf("%s basladi: %d islem.", op ? "Kaldirma" : "Uygulama", total);
+  sbui_statusf("%s basladi (0/%d)...", op ? "Kaldirma" : "Ban", total);
   return 0;
 }
 
@@ -2419,13 +2300,12 @@ static void sbui_job_reap(void) {
   g_sb_job.ops = NULL;
 
   if (canceled) {
-    sbui_statusf("Iptal edildi: %d/%d islem tamamlandi (%d eklendi/kaldirildi).",
-                 processed, total, ok);
+    sbui_statusf("Iptal edildi (%d/%d).", processed, total);
   } else if (op == 0) {
-    sbui_statusf("Uygulama bitti: %d eklendi, %d zaten vardi, %d hata.",
+    sbui_statusf("Ban tamam: %d eklendi, %d zaten vardi, %d hata.",
                  ok, skipped, failed);
   } else {
-    sbui_statusf("Kaldirma bitti: %d kaldirildi, %d bulunamadi, %d hata.",
+    sbui_statusf("Kaldirma tamam: %d kaldirildi, %d bulunamadi, %d hata.",
                  ok, skipped, failed);
   }
 }
@@ -2440,81 +2320,82 @@ static void sbui_job_shutdown(void) {
   g_sb_job.ops = NULL;
 }
 
-static int sbui_start_bulk(int op) {
+/* ---- Islemler ---- */
+static int sbui_do_ban(void) {
   if (g_sb_job.thread_live) {
-    sbui_status_set("Baska bir toplu islem suruyor.");
+    sbui_status_set("Islem suruyor, bitmesini bekleyin.");
     return -1;
   }
-  if (g_sb_site_count <= 0) {
-    sbui_status_set("Once islem listesine site ekleyin.");
+  char dom[SB_DOMAIN_LEN];
+  strncpy(dom, g_sb_domain, sizeof(dom) - 1);
+  dom[sizeof(dom) - 1] = '\0';
+  sbui_trim(dom);
+  sbui_lower(dom);
+  if (!dom[0]) {
+    sbui_status_set("Once site adini yazin.");
     return -1;
   }
-  char ips[SB_UI_SEL_MAX][MAX_IP_LEN];
-  int nip = sbui_eff_ips(ips, SB_UI_SEL_MAX);
+  int nip = sbui_sel_count_cur();
   if (nip <= 0) {
-    sbui_status_set(g_sb_joker_sel ? "Joker secili." :
-                    "Hic IP secilmedi (veya hepsi haric).");
+    sbui_status_set("Soldaki listeden en az bir IP isaretleyin.");
     return -1;
   }
-  int total = nip * g_sb_site_count;
-  if (total <= 0) return -1;
-
-  if (op == 0) {
-    int current = site_block_rule_count();
-    int newpairs = 0;
-    for (int si = 0; si < g_sb_site_count; si++) {
-      for (int ii = 0; ii < nip; ii++) {
-        if (site_block_find_rule(ips[ii], g_sb_sites[si]) < 0) newpairs++;
-      }
-    }
-    if (current + newpairs > SB_MAX_RULES) {
-      sbui_statusf("Kural siniri asilir: %d mevcut + %d yeni > %d.",
-                   current, newpairs, SB_MAX_RULES);
-      return -1;
-    }
+  if (site_block_rule_count() >= SB_MAX_RULES) {
+    sbui_statusf("Kural siniri dolu (%d).", SB_MAX_RULES);
+    return -1;
   }
 
-  SbUiOp *ops = (SbUiOp *)malloc((size_t)total * sizeof(SbUiOp));
+  SbUiOp *ops = (SbUiOp *)malloc((size_t)nip * sizeof(SbUiOp));
   if (!ops) {
     sbui_status_set("Bellek yetersiz.");
     return -1;
   }
   int k = 0;
-  for (int si = 0; si < g_sb_site_count; si++) {
-    for (int ii = 0; ii < nip; ii++) {
-      strncpy(ops[k].ip, ips[ii], SB_IP_LEN - 1);
-      ops[k].ip[SB_IP_LEN - 1] = '\0';
-      strncpy(ops[k].domain, g_sb_sites[si], SB_DOMAIN_LEN - 1);
-      ops[k].domain[SB_DOMAIN_LEN - 1] = '\0';
-      k++;
-    }
+  for (int i = 0; i < g_mon_count && k < nip; i++) {
+    const char *ip = g_mon_ips[i];
+    if (!sbui_sel_has(ip)) continue;
+    strncpy(ops[k].ip, ip, SB_IP_LEN - 1);
+    ops[k].ip[SB_IP_LEN - 1] = '\0';
+    strncpy(ops[k].domain, dom, SB_DOMAIN_LEN - 1);
+    ops[k].domain[SB_DOMAIN_LEN - 1] = '\0';
+    k++;
   }
-  return sbui_job_launch(ops, total, op, g_sb_mode);
+  if (sbui_job_launch(ops, k, 0, g_sb_mode) == 0) {
+    strncpy(g_sb_open_dom, dom, SB_DOMAIN_LEN - 1);
+    g_sb_open_dom[SB_DOMAIN_LEN - 1] = '\0';
+    g_sb_domain[0] = '\0';
+  }
+  return 0;
 }
 
-static int sbui_start_remove_rules(const SiteBlockRule *rules, int n) {
+static int sbui_do_unban(void) {
   if (g_sb_job.thread_live) {
-    sbui_status_set("Baska bir toplu islem suruyor.");
+    sbui_status_set("Islem suruyor, bitmesini bekleyin.");
     return -1;
   }
-  if (!rules || n <= 0) return -1;
-  SbUiOp *ops = (SbUiOp *)malloc((size_t)n * sizeof(SbUiOp));
+  if (!g_sb_open_dom[0] || g_sb_unb_count <= 0) {
+    sbui_status_set("Sag listede siteden IP isaretleyin.");
+    return -1;
+  }
+  SbUiOp *ops = (SbUiOp *)malloc((size_t)g_sb_unb_count * sizeof(SbUiOp));
   if (!ops) {
     sbui_status_set("Bellek yetersiz.");
     return -1;
   }
-  for (int i = 0; i < n; i++) {
-    strncpy(ops[i].ip, rules[i].ip, SB_IP_LEN - 1);
+  for (int i = 0; i < g_sb_unb_count; i++) {
+    strncpy(ops[i].ip, g_sb_unb_ips[i], SB_IP_LEN - 1);
     ops[i].ip[SB_IP_LEN - 1] = '\0';
-    strncpy(ops[i].domain, rules[i].domain, SB_DOMAIN_LEN - 1);
+    strncpy(ops[i].domain, g_sb_open_dom, SB_DOMAIN_LEN - 1);
     ops[i].domain[SB_DOMAIN_LEN - 1] = '\0';
   }
-  return sbui_job_launch(ops, n, 1, g_sb_mode);
+  int n = g_sb_unb_count;
+  if (sbui_job_launch(ops, n, 1, g_sb_mode) == 0) g_sb_unb_count = 0;
+  return 0;
 }
 
 static void sbui_remove_one(const char *ip, const char *domain) {
   if (g_sb_job.thread_live) {
-    sbui_status_set("Toplu islem surerken tek kural silinemez.");
+    sbui_status_set("Islem suruyor, bitmesini bekleyin.");
     return;
   }
   int idx = site_block_find_rule(ip, domain);
@@ -2528,7 +2409,7 @@ static void sbui_remove_one(const char *ip, const char *domain) {
     sbui_status_set("Kural kaldirilamadi.");
 }
 
-/* ---- Kucuk cizim yardimcilari ---- */
+/* ---- Cizim yardimcilari ---- */
 static int sbui_check(Rectangle r, int on, Color col) {
   int hov = CheckCollisionPointRec(GetMousePosition(), r);
   DrawRectangleRounded(r, 0.22f, 3, on ? ui_alpha(col, 55) : COLOR_SURFACE);
@@ -2552,10 +2433,11 @@ static int sbui_action_button(Rectangle r, const char *label, Color col, int ena
                        ui_alpha(col, enabled ? (hov ? 95 : 42) : 10));
   DrawRectangleRoundedLinesEx(r, 0.28f, 6, 1.0f,
                               ui_alpha(col, enabled ? (hov ? 230 : 170) : 45));
-  Color tc = enabled ? (hov ? COLOR_TEXT : COLOR_TEXT_SEC) : ui_alpha(COLOR_TEXT_DIM, 140);
-  int tw = ui_text_w(label, 9);
+  Color tc = enabled ? (hov ? COLOR_TEXT : COLOR_TEXT_SEC)
+                     : ui_alpha(COLOR_TEXT_DIM, 140);
+  int tw = ui_text_w(label, 12);
   DrawTextC(label, (int)(r.x + (r.width - tw) / 2),
-            (int)(r.y + (r.height - 9) / 2), 9, tc);
+            (int)(r.y + (r.height - 12) / 2), 12, tc);
   return enabled && hov && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
 }
 
@@ -2573,11 +2455,23 @@ static int sbui_mini_button(Rectangle r, const char *label, Color col, int enabl
   return enabled && hov && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
 }
 
+static int sbui_seg_button(Rectangle r, const char *label, int active, Color col) {
+  int hov = CheckCollisionPointRec(GetMousePosition(), r);
+  DrawRectangleRounded(r, 0.3f, 5,
+                       active ? ui_alpha(col, 45)
+                              : (hov ? COLOR_PANEL_HOVER : COLOR_SURFACE2));
+  DrawRectangleRoundedLinesEx(r, 0.3f, 5, 1.0f,
+                              active ? col : ui_alpha(COLOR_BORDER, 140));
+  int tw = ui_text_w(label, 10);
+  DrawTextC(label, (int)(r.x + (r.width - tw) / 2),
+            (int)(r.y + (r.height - 10) / 2), 10,
+            active ? col : COLOR_TEXT_SEC);
+  return hov && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+}
+
 static void sbui_draw_clipped(const char *text, int x, int y, int maxw,
                               int size, Color color) {
-  if (!text) return;
-  if (maxw <= 0)
-    return;
+  if (!text || maxw <= 0) return;
   if (ui_text_w(text, size) <= maxw) {
     DrawTextC(text, x, y, size, color);
     return;
@@ -2605,677 +2499,458 @@ static void sbui_progress_bar(Rectangle r, float pct, Color col) {
   DrawRectangleRoundedLinesEx(r, 0.5f, 4, 1.0f, ui_alpha(col, 110));
 }
 
-static void sbui_mode_buttons(int x, int y, int w) {
-  int modes[3] = {SB_MODE_SINKHOLE, SB_MODE_RST, SB_MODE_BOTH};
-  const char *labels[3] = {"DNS", "RST", "Ikisi"};
-  int mbw = (w - 8) / 3;
-  for (int m = 0; m < 3; m++) {
-    Rectangle r = {(float)(x + m * (mbw + 4)), (float)y, (float)mbw, 20};
-    int act = (g_sb_mode == modes[m]);
-    int hov = CheckCollisionPointRec(GetMousePosition(), r);
-    DrawRectangleRounded(r, 0.3f, 4,
-                         act ? ui_alpha(COLOR_RED, 45)
-                             : (hov ? COLOR_PANEL_HOVER : COLOR_SURFACE2));
-    if (act)
-      DrawRectangleRoundedLinesEx(r, 0.3f, 4, 1.0f, COLOR_RED);
-    int tw = ui_text_w(labels[m], 9);
-    DrawTextC(labels[m], (int)(r.x + (r.width - tw) / 2), y + 6, 9,
-              act ? COLOR_RED : COLOR_TEXT_SEC);
-    if (hov && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) g_sb_mode = modes[m];
-  }
-}
-
-static int sbui_seg_button(Rectangle r, const char *label, int active, Color col) {
-  int hov = CheckCollisionPointRec(GetMousePosition(), r);
-  DrawRectangleRounded(r, 0.3f, 5,
-                       active ? ui_alpha(col, 45)
-                              : (hov ? COLOR_PANEL_HOVER : COLOR_SURFACE2));
-  DrawRectangleRoundedLinesEx(r, 0.3f, 5, 1.0f,
-                              active ? col : ui_alpha(COLOR_BORDER, 140));
-  int tw = ui_text_w(label, 9);
-  DrawTextC(label, (int)(r.x + (r.width - tw) / 2),
-            (int)(r.y + (r.height - 9) / 2), 9,
-            active ? col : COLOR_TEXT_SEC);
-  return hov && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
-}
-
-/* ---- Sol panel: IP coklu secim + istisna ---- */
-static void draw_sb_left(int x, int y, int w, int h) {
-  DrawRoundedPanel((Rectangle){x, y, w, h}, COLOR_PANEL,
-                   ui_alpha(COLOR_BORDER, 150));
-  draw_panel_title(x + 10, y + 8, "IP SECIMI", 12, COLOR_CYAN);
-
-  char b[128];
-  if (g_sb_joker_sel)
-    snprintf(b, sizeof(b), "Secili: tum ag");
+static void sbui_chevron(float cx, float cy, int open, Color c) {
+  if (open)
+    DrawTriangle((Vector2){cx, cy}, (Vector2){cx + 9, cy},
+                 (Vector2){cx + 4.5f, cy + 7}, c);
   else
-    snprintf(b, sizeof(b), "Secili: %d / %d", sbui_sel_count_cur(), g_mon_count);
-  DrawTextC(b, x + w - ui_text_w(b, 8) - 10, y + 10, 8, COLOR_TEXT_SEC);
+    DrawTriangle((Vector2){cx, cy}, (Vector2){cx, cy + 9},
+                 (Vector2){cx + 7, cy + 4.5f}, c);
+}
+
+/* ------------------------------------------------------------------
+ *  SOL LISTE — IP'ler (kutu = sec, satir = o IP'nin siteleri)
+ * ------------------------------------------------------------------ */
+static int sbui_ip_list_h(void) {
+  int h = 0;
+  for (int i = 0; i < g_mon_count; i++) {
+    const char *ip = g_mon_ips[i];
+    if (!sbui_ci_contains(ip, g_sb_ip_filter)) continue;
+    h += 32;
+    if (strcmp(g_sb_open_ip, ip) == 0) {
+      int c = sbui_ip_site_count(ip);
+      h += (c > 0 ? c : 1) * 26 + 8;
+    }
+  }
+  return h + 8;
+}
+
+static void sbui_draw_ip_list(int x, int y, int w, int h) {
+  DrawRoundedPanel((Rectangle){(float)x, (float)y, (float)w, (float)h},
+                   COLOR_PANEL, ui_alpha(COLOR_BORDER, 150));
+  draw_panel_title(x + 12, y + 10, "IP LISTESI", 12, COLOR_CYAN);
+
+  char b[64];
+  snprintf(b, sizeof(b), "%d secili", sbui_sel_count_cur());
+  DrawTextC(b, x + w - ui_text_w(b, 9) - 12, y + 12, 9,
+            sbui_sel_count_cur() ? COLOR_CYAN : COLOR_TEXT_DIM);
 
   int mclick = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
 
-  Rectangle sr = {(float)(x + 10), (float)(y + 30), (float)(w - 20), 22};
+  Rectangle sr = {(float)(x + 12), (float)(y + 32), (float)(w - 24), 24};
   int shov = CheckCollisionPointRec(GetMousePosition(), sr);
   if (mclick && shov) {
     g_sb_ip_filter_active = 1;
     g_sb_domain_active = 0;
+    g_sb_dom_filter_active = 0;
+    g_sb_vis_filter_active = 0;
     g_sb_sinkhole_active = 0;
-    g_sb_inv_filter_active = 0;
   } else if (mclick && !shov) {
     g_sb_ip_filter_active = 0;
   }
   GuiTextBox(sr, g_sb_ip_filter, (int)sizeof(g_sb_ip_filter),
              g_sb_ip_filter_active != 0);
   if (!g_sb_ip_filter[0] && !g_sb_ip_filter_active)
-    DrawTextC("IP ara...", x + 16, y + 36, 9, ui_alpha(COLOR_TEXT_DIM, 160));
+    DrawTextC("IP ara...", (int)sr.x + 8, (int)sr.y + 7, 9,
+              ui_alpha(COLOR_TEXT_DIM, 160));
 
-  int bw = (w - 20 - 8) / 3;
-  if (sbui_action_button((Rectangle){x + 10, y + 58, bw, 20}, "TUMU",
-                         COLOR_CYAN, 1)) {
-    sbui_set_joker(0);
+  int half = (w - 24 - 6) / 2;
+  if (sbui_mini_button((Rectangle){x + 12, (float)(y + 62), (float)half, 20},
+                       "TUMUNU SEC", COLOR_CYAN, g_mon_count > 0)) {
+    g_sb_sel_count = 0;
     for (int i = 0; i < g_mon_count; i++) sbui_sel_add(g_mon_ips[i]);
     sbui_statusf("%d IP secildi.", sbui_sel_count_cur());
   }
-  if (sbui_action_button((Rectangle){x + 14 + bw, y + 58, bw, 20}, "HICBIRI",
-                         COLOR_TEXT_DIM, 1)) {
-    sbui_set_joker(0);
+  if (sbui_mini_button((Rectangle){x + 18 + half, (float)(y + 62),
+                                   (float)half, 20}, "SECIMI TEMIZLE",
+                       COLOR_TEXT_DIM, g_sb_sel_count > 0)) {
     g_sb_sel_count = 0;
     sbui_status_set("Secim temizlendi.");
   }
-  if (sbui_action_button((Rectangle){x + 18 + bw * 2, y + 58, bw, 20}, "TERS",
-                         COLOR_CYAN, 1)) {
-    sbui_set_joker(0);
-    for (int i = 0; i < g_mon_count; i++) {
-      const char *ip = g_mon_ips[i];
-      if (sbui_sel_has(ip)) sbui_sel_del(ip);
-      else sbui_sel_add(ip);
-    }
-    sbui_status_set("Secim terslendi.");
-  }
 
-  DrawTextC("H = haric tut (toplu uygulamada atlanir)", x + 10, y + 83, 8,
-            COLOR_TEXT_DIM);
-
-  int ebw = (w - 20) * 55 / 100;
-  if (sbui_action_button((Rectangle){x + 10, y + 96, ebw, 20},
-                         "SECILENLERI HARIC TUT", COLOR_AMBER, 1)) {
-    int n = 0;
-    for (int i = 0; i < g_mon_count; i++) {
-      const char *ip = g_mon_ips[i];
-      if (sbui_sel_has(ip) && sbui_exc_add(ip) > 0) n++;
-    }
-    sbui_statusf("%d IP haric tutuldu.", n);
-  }
-  if (sbui_action_button((Rectangle){x + 18 + ebw, y + 96, w - 28 - ebw, 20},
-                         "HARICLERI TEMIZLE", COLOR_TEXT_DIM, 1)) {
-    g_sb_exc_count = 0;
-    sbui_status_set("Haric listesi temizlendi.");
-  }
-
-  int list_y = y + 124;
-  int list_h = h - 132;
+  int list_top = y + 90;
+  int list_h = h - (list_top - y) - 10;
   if (list_h < 40) list_h = 40;
-  Rectangle area = {(float)(x + 6), (float)list_y, (float)(w - 12), (float)list_h};
-
-  int visible_ips = 0;
-  for (int i = 0; i < g_mon_count; i++)
-    if (sbui_ci_contains(g_mon_ips[i], g_sb_ip_filter)) visible_ips++;
-  float content_h = 24.0f + (float)visible_ips * 20.0f + 4.0f;
-  float max_scroll = content_h - list_h;
+  Rectangle area = {(float)(x + 8), (float)list_top, (float)(w - 16),
+                    (float)list_h};
+  int content_h = sbui_ip_list_h();
+  float max_scroll = (float)content_h - list_h;
   if (max_scroll < 0) max_scroll = 0;
   if (CheckCollisionPointRec(GetMousePosition(), area)) {
-    g_sb_scroll_ips -= GetMouseWheelMove() * 20.0f;
+    g_sb_scroll_ips -= GetMouseWheelMove() * 26.0f;
     if (g_sb_scroll_ips < 0) g_sb_scroll_ips = 0;
     if (g_sb_scroll_ips > max_scroll) g_sb_scroll_ips = max_scroll;
   }
 
   BeginScissorModeScaled((int)area.x, (int)area.y, (int)area.width,
                          (int)area.height);
-  int jy = list_y - (int)g_sb_scroll_ips;
-  Rectangle jr = {(float)(x + 10), (float)jy, (float)(w - 20), 21};
-  if (jy + 21 >= list_y && jy <= list_y + list_h) {
-    int jhov = CheckCollisionPointRec(GetMousePosition(), jr);
-    if (g_sb_joker_sel)
-      DrawRectangleRounded(jr, 0.2f, 4, ui_alpha(COLOR_RED, 35));
-    else if (jhov)
-      DrawRectangleRounded(jr, 0.2f, 4, COLOR_PANEL_HOVER);
-    Rectangle jc = {jr.x + 3, jr.y + 4, 13, 13};
-    if (sbui_check(jc, g_sb_joker_sel, COLOR_RED))
-      sbui_set_joker(!g_sb_joker_sel);
-    else if (jhov && !CheckCollisionPointRec(GetMousePosition(), jc) &&
-             mclick)
-      sbui_set_joker(!g_sb_joker_sel);
-    DrawTextC("Tum IP'ler (joker)", jr.x + 24, jr.y + 6, 9,
-              g_sb_joker_sel ? COLOR_RED : COLOR_TEXT);
-    DrawTextC("TUM AG", jr.x + jr.width - ui_text_w("TUM AG", 7) - 6,
-              jr.y + 7, 7, COLOR_TEXT_DIM);
+  int yy = list_top - (int)g_sb_scroll_ips;
+
+  if (g_mon_count == 0) {
+    DrawTextC("Izleme listesi bos.", (int)area.x + 10, yy + 8, 10,
+              COLOR_TEXT_DIM);
+    DrawTextC("Kontrol Paneli > TUMUNU EKLE ile doldurun.",
+              (int)area.x + 10, yy + 26, 9, ui_alpha(COLOR_TEXT_DIM, 170));
   }
 
-  int yy = jy + 23;
-  int drawn = 0;
   for (int i = 0; i < g_mon_count; i++) {
     const char *ip = g_mon_ips[i];
     if (!sbui_ci_contains(ip, g_sb_ip_filter)) continue;
-    if (yy + 20 >= list_y && yy <= list_y + list_h) {
-      Rectangle row = {(float)(x + 10), (float)yy, (float)(w - 20), 19};
-      int hov = CheckCollisionPointRec(GetMousePosition(), row);
-      int exc = sbui_exc_has(ip);
-      int sel = sbui_sel_has(ip);
-      if (exc)
-        DrawRectangleRounded(row, 0.2f, 4, ui_alpha(COLOR_AMBER, 22));
-      else if (hov)
-        DrawRectangleRounded(row, 0.2f, 4, COLOR_PANEL_HOVER);
-      if (exc) DrawRectangle((int)row.x, (int)row.y + 2, 2, 15, COLOR_AMBER);
 
-      Rectangle cb = {row.x + 3, row.y + 3, 13, 13};
-      int over_cb = CheckCollisionPointRec(GetMousePosition(), cb);
-      Rectangle hb = {row.x + row.width - 24, row.y + 2, 20, 14};
-      int over_hb = CheckCollisionPointRec(GetMousePosition(), hb);
+    Rectangle row = {(float)(x + 10), (float)yy, (float)(w - 20), 30};
+    int hov = CheckCollisionPointRec(GetMousePosition(), row);
+    int sel = sbui_sel_has(ip);
+    int open = (strcmp(g_sb_open_ip, ip) == 0);
+    if (open) DrawRectangleRounded(row, 0.1f, 3, COLOR_SURFACE);
+    else if (hov) DrawRectangleRounded(row, 0.1f, 3, COLOR_PANEL_HOVER);
 
-      if (sbui_check(cb, sel, COLOR_CYAN)) {
-        g_sb_joker_sel = 0;
-        if (sel) sbui_sel_del(ip);
-        else sbui_sel_add(ip);
-      } else if (hov && mclick && !over_cb && !over_hb) {
-        g_sb_joker_sel = 0;
-        if (sel) sbui_sel_del(ip);
-        else sbui_sel_add(ip);
+    Rectangle cb = {row.x + 8, row.y + 7, 16, 16};
+    int over_cb = CheckCollisionPointRec(GetMousePosition(), cb);
+    if (sbui_check(cb, sel, COLOR_CYAN)) {
+      if (sel) sbui_sel_del(ip);
+      else sbui_sel_add(ip);
+    } else if (hov && mclick && !over_cb) {
+      if (open) g_sb_open_ip[0] = '\0';
+      else {
+        strncpy(g_sb_open_ip, ip, MAX_IP_LEN - 1);
+        g_sb_open_ip[MAX_IP_LEN - 1] = '\0';
       }
-
-      DrawTextC(ip, (int)row.x + 24, (int)row.y + 5, 9, COLOR_TEXT);
-
-      DrawRectangleRounded(hb, 0.3f, 3,
-                           exc ? ui_alpha(COLOR_AMBER, 75) : COLOR_SURFACE);
-      DrawRectangleRoundedLinesEx(hb, 0.3f, 3, 1.0f,
-                                  ui_alpha(COLOR_AMBER, exc ? 220 : 70));
-      DrawTextC("H", (int)(hb.x + (hb.width - ui_text_w("H", 8)) / 2),
-                (int)hb.y + 3, 8, exc ? COLOR_AMBER : COLOR_TEXT_DIM);
-      if (over_hb && mclick) {
-        if (exc) sbui_exc_del(ip);
-        else sbui_exc_add(ip);
-      }
-      drawn++;
     }
-    yy += 20;
-  }
 
-  if (g_mon_count == 0) {
-    DrawTextC("Izleme listesi bos.", x + 16, jy + 30, 9, COLOR_TEXT_DIM);
-    DrawTextC("Kontrol Paneli > TUMUNU EKLE ile doldurun.", x + 16,
-              jy + 44, 8, ui_alpha(COLOR_TEXT_DIM, 170));
-  } else if (drawn == 0) {
-    DrawTextC("Filtreyle eslesen IP yok.", x + 16, jy + 30, 9,
-              COLOR_TEXT_DIM);
+    DrawTextC(ip, (int)row.x + 34, (int)row.y + 10, 11,
+              sel ? COLOR_TEXT : COLOR_TEXT_SEC);
+
+    int cnt = sbui_ip_site_count(ip);
+    if (cnt > 0) {
+      snprintf(b, sizeof(b), "%d site", cnt);
+      DrawTextC(b, x + w - 42 - ui_text_w(b, 8), yy + 11, 8, COLOR_RED);
+    }
+    sbui_chevron((float)(x + w - 26), (float)(yy + 11), open, COLOR_TEXT_DIM);
+    yy += 32;
+
+    if (!open) continue;
+
+    int c = sbui_ip_site_count(ip);
+    if (c == 0) {
+      DrawTextC("Bu IP'de karartma yok.", (int)row.x + 34, yy + 5, 9,
+                COLOR_TEXT_DIM);
+      yy += 26;
+    } else {
+      for (int k = 0; k < g_sb_snap_n; k++) {
+        SiteBlockRule r = g_sb_rules_snap[k];
+        if (strcmp(r.ip, ip) != 0) continue;
+        Rectangle sr2 = {(float)(x + 16), (float)yy, (float)(w - 30), 24};
+        int h2 = CheckCollisionPointRec(GetMousePosition(), sr2);
+        if (h2) DrawRectangleRounded(sr2, 0.1f, 3, ui_alpha(COLOR_PANEL_HOVER, 160));
+        DrawRectangle((int)sr2.x, (int)sr2.y + 3, 2, 18, COLOR_RED);
+        sbui_draw_clipped(r.domain, (int)sr2.x + 12, (int)sr2.y + 7, w - 130,
+                          10, COLOR_TEXT);
+        if (sbui_mini_button((Rectangle){x + w - 84, (float)(yy + 4), 66, 17},
+                             "Kaldir", COLOR_RED, !g_sb_job.thread_live))
+          sbui_remove_one(r.ip, r.domain);
+        yy += 26;
+      }
+    }
+    yy += 8;
   }
   EndScissorMode();
-  draw_custom_scrollbar((float)(x + w - 10), (float)list_y, 8.0f,
-                        (float)list_h, content_h, &g_sb_scroll_ips);
+  draw_custom_scrollbar((float)(x + w - 10), (float)list_top, 7.0f,
+                        (float)list_h, (float)content_h, &g_sb_scroll_ips);
 }
 
-/* ---- Orta panel: site listesi + toplu uygula/kaldir ---- */
-static void draw_sb_center(int x, int y, int w, int h, SiteBlockStats *st) {
-  DrawRoundedPanel((Rectangle){x, y, w, h}, COLOR_PANEL,
-                   ui_alpha(COLOR_BORDER, 150));
-  draw_panel_title(x + 10, y + 8, "TOPLU ISLEM", 12, COLOR_RED);
+/* ------------------------------------------------------------------
+ *  SAG LISTE — Siteler (satir = o sitede banli IP'ler)
+ * ------------------------------------------------------------------ */
+static int sbui_dom_list_h(int ndom) {
+  int h = 0;
+  for (int i = 0; i < ndom; i++) {
+    const char *d = g_sb_dom_list[i];
+    if (!sbui_ci_contains(d, g_sb_dom_filter)) continue;
+    h += 32;
+    if (strcmp(g_sb_open_dom, d) == 0) {
+      int c = sbui_dom_ip_count(d);
+      h += (c > 0 ? c : 1) * 26 + 36;
+    }
+  }
+  return h + 8;
+}
 
-  int en = site_block_is_enabled();
-  draw_led((float)(x + w - 120), (float)(y + 14), 3.0f,
-           en ? COLOR_GREEN : COLOR_RED, en);
-  DrawTextC(en ? "ACIK" : "KAPALI", x + w - 112, y + 8, 8,
-            en ? COLOR_GREEN : COLOR_TEXT_DIM);
-  if (sbui_mini_button((Rectangle){x + w - 54, y + 5, 44, 18},
-                       en ? "Kapat" : "Ac",
-                       en ? COLOR_RED : COLOR_GREEN, 1)) {
-    site_block_set_enabled(!en);
-    sbui_status_set(en ? "Site karartma kapatildi." : "Site karartma acildi.");
+static void sbui_draw_dom_list(int x, int y, int w, int h) {
+  DrawRoundedPanel((Rectangle){(float)x, (float)y, (float)w, (float)h},
+                   COLOR_PANEL, ui_alpha(COLOR_BORDER, 150));
+  draw_panel_title(x + 12, y + 10, "SITE LISTESI", 12, COLOR_RED);
+  {
+    const char *hint = "satira tikla: o sitede banli IP'ler";
+    DrawTextC(hint, x + w - ui_text_w(hint, 8) - 12, y + 12, 8,
+              ui_alpha(COLOR_TEXT_DIM, 190));
   }
 
   int mclick = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
-  int cy = y + 28;
-  DrawTextC("Site(ler):", x + 10, cy, 9, COLOR_TEXT_SEC);
-  cy += 13;
 
-  Rectangle dbox = {(float)(x + 10), (float)cy, (float)(w - 20), 24};
-  int dhover = CheckCollisionPointRec(GetMousePosition(), dbox);
-  if (mclick && dhover) {
-    g_sb_domain_active = 1;
-    g_sb_sinkhole_active = 0;
-    g_sb_ip_filter_active = 0;
-    g_sb_inv_filter_active = 0;
-  } else if (mclick && !dhover) {
+  Rectangle sr = {(float)(x + 12), (float)(y + 32), (float)(w - 24), 24};
+  int shov = CheckCollisionPointRec(GetMousePosition(), sr);
+  if (mclick && shov) {
+    g_sb_dom_filter_active = 1;
     g_sb_domain_active = 0;
+    g_sb_ip_filter_active = 0;
+    g_sb_vis_filter_active = 0;
+    g_sb_sinkhole_active = 0;
+  } else if (mclick && !shov) {
+    g_sb_dom_filter_active = 0;
   }
-  if (GuiTextBox(dbox, g_sb_domain, (int)sizeof(g_sb_domain),
-                 g_sb_domain_active != 0)) {
-    int r = sbui_parse_sites(g_sb_domain);
-    if (r > 0) {
-      sbui_statusf("%d site islem listesine eklendi.", r);
-      g_sb_domain[0] = '\0';
-    } else if (r == 0 && g_sb_domain[0]) {
-      sbui_status_set("Site zaten listede.");
-    } else if (r < 0) {
-      sbui_statusf("Liste dolu (en fazla %d site).", SB_UI_MAX_SITES);
-    }
-  }
-  cy += 27;
+  GuiTextBox(sr, g_sb_dom_filter, (int)sizeof(g_sb_dom_filter),
+             g_sb_dom_filter_active != 0);
+  if (!g_sb_dom_filter[0] && !g_sb_dom_filter_active)
+    DrawTextC("site ara...", (int)sr.x + 8, (int)sr.y + 7, 9,
+              ui_alpha(COLOR_TEXT_DIM, 160));
 
-  DrawTextC("Virgulle ayirin: x.com, y.com", x + 10, cy, 8, COLOR_TEXT_DIM);
-  cy += 12;
-  if (sbui_action_button((Rectangle){x + 10, cy, w - 20, 22},
-                         "LISTEYE EKLE", COLOR_CYAN, 1)) {
-    int r = sbui_parse_sites(g_sb_domain);
-    if (r > 0) {
-      sbui_statusf("%d site islem listesine eklendi.", r);
-      g_sb_domain[0] = '\0';
-    } else if (r == 0) {
-      sbui_status_set("Site zaten listede veya bos.");
-    } else {
-      sbui_statusf("Liste dolu (en fazla %d site).", SB_UI_MAX_SITES);
-    }
-  }
-  cy += 30;
+  int ndom = sbui_dom_list_build();
 
-  char hdr[96];
-  snprintf(hdr, sizeof(hdr), "Islem Listesi (%d/%d)", g_sb_site_count,
-           SB_UI_MAX_SITES);
-  DrawTextC(hdr, x + 10, cy, 9, COLOR_TEXT_SEC);
-  if (sbui_mini_button((Rectangle){x + w - 62, cy - 3, 52, 15}, "Temizle",
-                       COLOR_TEXT_DIM, g_sb_site_count > 0)) {
-    g_sb_site_count = 0;
-    g_sb_scroll_sites = 0;
-    sbui_status_set("Islem listesi temizlendi.");
+  int list_top = y + 62;
+  int list_h = h - (list_top - y) - 10;
+  if (list_h < 40) list_h = 40;
+  Rectangle area = {(float)(x + 8), (float)list_top, (float)(w - 16),
+                    (float)list_h};
+  int content_h = sbui_dom_list_h(ndom);
+  float max_scroll = (float)content_h - list_h;
+  if (max_scroll < 0) max_scroll = 0;
+  if (CheckCollisionPointRec(GetMousePosition(), area)) {
+    g_sb_scroll_doms -= GetMouseWheelMove() * 26.0f;
+    if (g_sb_scroll_doms < 0) g_sb_scroll_doms = 0;
+    if (g_sb_scroll_doms > max_scroll) g_sb_scroll_doms = max_scroll;
   }
-  cy += 13;
 
-  Rectangle site_area = {(float)(x + 10), (float)cy, (float)(w - 20), 80};
-  DrawRectangleRounded(site_area, 0.03f, 4, COLOR_SURFACE);
-  DrawRectangleRoundedLinesEx(site_area, 0.03f, 4, 1.0f,
-                              ui_alpha(COLOR_BORDER, 90));
-  float scontent = (g_sb_site_count > 0 ? g_sb_site_count : 1) * 20.0f;
-  float smax = scontent - site_area.height;
-  if (smax < 0) smax = 0;
-  if (CheckCollisionPointRec(GetMousePosition(), site_area)) {
-    g_sb_scroll_sites -= GetMouseWheelMove() * 20.0f;
-    if (g_sb_scroll_sites < 0) g_sb_scroll_sites = 0;
-    if (g_sb_scroll_sites > smax) g_sb_scroll_sites = smax;
+  BeginScissorModeScaled((int)area.x, (int)area.y, (int)area.width,
+                         (int)area.height);
+  int yy = list_top - (int)g_sb_scroll_doms;
+
+  if (ndom == 0) {
+    DrawTextC("Henuz ban yok. Soldan IP isaretleyip asagidan site yazin.",
+              (int)area.x + 10, yy + 8, 10, COLOR_TEXT_DIM);
   }
-  BeginScissorModeScaled((int)site_area.x, (int)site_area.y,
-                         (int)site_area.width, (int)site_area.height);
-  if (g_sb_site_count == 0) {
-    DrawTextC("Site ekleyin (ornek: instagram.com)", x + 16,
-              cy + 10, 9, COLOR_TEXT_DIM);
-  }
-  for (int i = 0; i < g_sb_site_count; i++) {
-    int ry = (int)site_area.y + 2 + i * 20 - (int)g_sb_scroll_sites;
-    if (ry + 20 < site_area.y || ry > site_area.y + site_area.height) continue;
-    Rectangle row = {(float)(x + 12), (float)ry, (float)(w - 24), 19};
+
+  char b[64];
+  for (int i = 0; i < ndom; i++) {
+    const char *d = g_sb_dom_list[i];
+    if (!sbui_ci_contains(d, g_sb_dom_filter)) continue;
+    int open = (strcmp(g_sb_open_dom, d) == 0);
+
+    Rectangle row = {(float)(x + 10), (float)yy, (float)(w - 20), 30};
     int hov = CheckCollisionPointRec(GetMousePosition(), row);
-    if (hov) DrawRectangleRounded(row, 0.15f, 3, COLOR_PANEL_HOVER);
-    sbui_draw_clipped(g_sb_sites[i], (int)row.x + 4, ry + 5, w - 58, 9,
-                      COLOR_TEXT);
-    Rectangle xb = {(float)(row.x + row.width - 18), (float)(ry + 3), 14, 13};
-    DrawRectangleRounded(xb, 0.3f, 3, ui_alpha(COLOR_RED, 30));
-    DrawTextC("x", (int)(xb.x + 5), ry + 3, 8, COLOR_RED);
-    if (CheckCollisionPointRec(GetMousePosition(), xb) && mclick) {
-      for (int k = i; k < g_sb_site_count - 1; k++)
-        strcpy(g_sb_sites[k], g_sb_sites[k + 1]);
-      g_sb_site_count--;
-      break;
+    if (open) DrawRectangleRounded(row, 0.1f, 3, COLOR_SURFACE);
+    else if (hov) DrawRectangleRounded(row, 0.1f, 3, COLOR_PANEL_HOVER);
+
+    if (!open) sbui_chevron((float)(row.x + 10), (float)(yy + 11), 0,
+                            COLOR_TEXT_DIM);
+    else sbui_chevron((float)(row.x + 10), (float)(yy + 11), 1, COLOR_RED);
+
+    sbui_draw_clipped(d, (int)row.x + 26, (int)yy + 10, w - 150, 11,
+                      open ? COLOR_RED : COLOR_TEXT);
+
+    int cnt = sbui_dom_ip_count(d);
+    snprintf(b, sizeof(b), "%d IP", cnt);
+    DrawTextC(b, x + w - 24 - ui_text_w(b, 9) - 14, yy + 10, 9, COLOR_TEXT_DIM);
+
+    if (hov && mclick) {
+      if (open) g_sb_open_dom[0] = '\0';
+      else {
+        strncpy(g_sb_open_dom, d, SB_DOMAIN_LEN - 1);
+        g_sb_open_dom[SB_DOMAIN_LEN - 1] = '\0';
+        g_sb_unb_count = 0;
+      }
     }
+    yy += 32;
+
+    if (!open) continue;
+
+    const char *joker_ip = NULL;
+    for (int k = 0; k < g_sb_snap_n; k++) {
+      SiteBlockRule r = g_sb_rules_snap[k];
+      if (strcmp(r.domain, d) != 0) continue;
+
+      if (strcmp(r.ip, "*") == 0) {
+        joker_ip = "*";
+        continue;
+      }
+      Rectangle sr2 = {(float)(x + 20), (float)yy, (float)(w - 34), 24};
+      int h2 = CheckCollisionPointRec(GetMousePosition(), sr2);
+      if (h2) DrawRectangleRounded(sr2, 0.1f, 3, ui_alpha(COLOR_PANEL_HOVER, 160));
+      Rectangle cb = {sr2.x + 6, sr2.y + 4, 16, 16};
+      int on = sbui_unb_has(r.ip);
+      if (sbui_check(cb, on, COLOR_AMBER)) sbui_unb_toggle(r.ip);
+      else if (h2 && mclick &&
+               !CheckCollisionPointRec(GetMousePosition(), cb))
+        sbui_unb_toggle(r.ip);
+      DrawTextC(r.ip, (int)sr2.x + 30, (int)sr2.y + 7, 10, COLOR_TEXT);
+      if (sbui_in_monitor(r.ip))
+        DrawTextC("izleniyor", (int)(sr2.x + sr2.width - 60),
+                  (int)sr2.y + 8, 8, ui_alpha(COLOR_GREEN, 150));
+      yy += 26;
+    }
+
+    if (joker_ip) {
+      DrawTextC("Tum ag (joker) kurali - tek tek kaldirilamaz.",
+                (int)row.x + 26, yy + 5, 9, COLOR_TEXT_DIM);
+      yy += 26;
+    }
+
+    Rectangle br = {(float)(x + 20), (float)(yy + 4), (float)(w - 36), 26};
+    char lbl[96];
+    snprintf(lbl, sizeof(lbl), "SECILI %d IP'NIN BANINI KALDIR", g_sb_unb_count);
+    if (sbui_action_button(br, lbl, COLOR_AMBER,
+                           !g_sb_job.thread_live && g_sb_unb_count > 0))
+      sbui_do_unban();
+    yy += 36;
   }
   EndScissorMode();
-  draw_custom_scrollbar((float)(x + w - 14), site_area.y, 6.0f,
-                        site_area.height, scontent, &g_sb_scroll_sites);
-  cy += 88;
+  draw_custom_scrollbar((float)(x + w - 10), (float)list_top, 7.0f,
+                        (float)list_h, (float)content_h, &g_sb_scroll_doms);
+}
 
-  DrawTextC("Mod:", x + 10, cy, 9, COLOR_TEXT_SEC);
-  cy += 13;
-  sbui_mode_buttons(x + 10, cy, w - 20);
-  cy += 26;
+/* ------------------------------------------------------------------
+ *  Karartma ekrani = iki liste + alt islem cubugu
+ * ------------------------------------------------------------------ */
+static void sbui_draw_main(int x, int y, int w, int h) {
+  int mclick = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+  sbui_snap_rules();
 
-  int eff = sbui_eff_count();
-  int pairs = eff * g_sb_site_count;
-  int can = (!g_sb_job.thread_live && eff > 0 && g_sb_site_count > 0);
-  if (sbui_action_button((Rectangle){x + 10, cy, w - 20, 30},
-                         "SECILI IP'LERE UYGULA", COLOR_RED, can))
-    sbui_start_bulk(0);
-  cy += 34;
-  if (sbui_action_button((Rectangle){x + 10, cy, w - 20, 26},
-                         "SECILI IP'LERDEN KALDIR", COLOR_AMBER, can))
-    sbui_start_bulk(1);
-  cy += 32;
-
-  char sum[160];
-  if (g_sb_joker_sel)
-    snprintf(sum, sizeof(sum), "Tum ag (joker) x %d site = %d islem",
-             g_sb_site_count, pairs);
-  else
-    snprintf(sum, sizeof(sum), "%d IP x %d site = %d islem", eff,
-             g_sb_site_count, pairs);
-  sbui_draw_clipped(sum, x + 10, cy, w - 20, 8, COLOR_TEXT_SEC);
-  cy += 12;
-  if (g_sb_exc_count > 0 && !g_sb_joker_sel) {
-    snprintf(sum, sizeof(sum), "%d IP haric tutuluyor.", g_sb_exc_count);
-    DrawTextC(sum, x + 10, cy, 8, COLOR_AMBER);
-  } else if (pairs > 0 &&
-             site_block_rule_count() + pairs > SB_MAX_RULES) {
-    snprintf(sum, sizeof(sum), "Ust sinir asilabilir: %d + %d > %d",
-             site_block_rule_count(), pairs, SB_MAX_RULES);
-    DrawTextC(sum, x + 10, cy, 8, COLOR_AMBER);
-  }
-  cy += 16;
-
-  if (g_sb_job.thread_live) {
-    int processed = g_sb_job.processed;
-    int total = g_sb_job.total;
-    char cur[sizeof(g_sb_job.current)];
-    pthread_mutex_lock(&g_sb_job.lock);
-    snprintf(cur, sizeof(cur), "%s", g_sb_job.current);
-    pthread_mutex_unlock(&g_sb_job.lock);
-    float pct = total > 0 ? (float)processed / (float)total : 0;
-    char ptxt[64];
-    snprintf(ptxt, sizeof(ptxt), "%d / %d", processed, total);
-    DrawTextC(ptxt, x + 10, cy, 8, COLOR_TEXT);
-    if (sbui_mini_button((Rectangle){x + w - 58, cy - 3, 48, 15}, "Iptal",
-                         COLOR_RED, 1))
-      g_sb_job.cancel = 1;
-    sbui_progress_bar((Rectangle){x + 10, cy + 12, w - 20, 8}, pct, COLOR_RED);
-    sbui_draw_clipped(cur, x + 10, cy + 24, w - 20, 7, COLOR_TEXT_DIM);
-    cy += 40;
-  } else {
-    cy += 8;
+  int set_h = 34;
+  int bar_h = 84;
+  int list_y = y + set_h + 8;
+  int list_h = h - set_h - 8 - bar_h - 8;
+  if (list_h < 220) {
+    list_h = h - set_h - 8;
+    bar_h = 0;
   }
 
-  DrawRectangle(x + 10, cy + 2, w - 20, 1, ui_alpha(COLOR_BORDER, 120));
-  cy += 8;
+  /* --- Ayar seridi --- */
+  DrawTextC("Mod:", x + 4, y + 11, 10, COLOR_TEXT_SEC);
+  int modes[3] = {SB_MODE_SINKHOLE, SB_MODE_RST, SB_MODE_BOTH};
+  const char *mlab[3] = {"DNS", "RST", "Ikisi"};
+  for (int m = 0; m < 3; m++) {
+    Rectangle r = {(float)(x + 42 + m * 62), (float)y, 58, 24};
+    int act = (g_sb_mode == modes[m]);
+    int hov = CheckCollisionPointRec(GetMousePosition(), r);
+    DrawRectangleRounded(r, 0.3f, 4,
+                         act ? ui_alpha(COLOR_RED, 45)
+                             : (hov ? COLOR_PANEL_HOVER : COLOR_SURFACE2));
+    if (act) DrawRectangleRoundedLinesEx(r, 0.3f, 4, 1.0f, COLOR_RED);
+    int tw = ui_text_w(mlab[m], 9);
+    DrawTextC(mlab[m], (int)(r.x + (r.width - tw) / 2), (int)r.y + 8, 9,
+              act ? COLOR_RED : COLOR_TEXT_SEC);
+    if (hov && mclick) g_sb_mode = modes[m];
+  }
 
-  DrawTextC("Sinkhole IP:", x + 10, cy, 8, COLOR_TEXT_DIM);
-  Rectangle sbox = {(float)(x + 82), (float)(cy - 3), (float)(w - 92), 20};
-  int shover = CheckCollisionPointRec(GetMousePosition(), sbox);
-  if (mclick && shover) {
+  DrawTextC("Sinkhole:", x + 246, y + 11, 10, COLOR_TEXT_SEC);
+  Rectangle sbox = {(float)(x + 308), (float)y, 140, 24};
+  int shov = CheckCollisionPointRec(GetMousePosition(), sbox);
+  if (mclick && shov) {
     g_sb_sinkhole_active = 1;
     g_sb_domain_active = 0;
     g_sb_ip_filter_active = 0;
-    g_sb_inv_filter_active = 0;
-  } else if (mclick && !shover) {
+    g_sb_dom_filter_active = 0;
+    g_sb_vis_filter_active = 0;
+  } else if (mclick && !shov) {
     g_sb_sinkhole_active = 0;
   }
   if (GuiTextBox(sbox, g_sb_sinkhole, (int)sizeof(g_sb_sinkhole),
                  g_sb_sinkhole_active != 0))
     site_block_set_sinkhole_ip(g_sb_sinkhole);
-  cy += 24;
 
-  snprintf(sum, sizeof(sum), "Kural: %d / %d   Kapsam: %d",
-           site_block_rule_count(), SB_MAX_RULES, st->scope_count);
-  DrawTextC(sum, x + 10, cy, 8, COLOR_TEXT_DIM);
-  cy += 12;
-  snprintf(sum, sizeof(sum), "Cekirdek: IP %lu + DNS %lu%s",
-           st->fw_ip_rules, st->fw_dns_rules,
-           st->fw_ready ? "" : " (hazir degil)");
-  DrawTextC(sum, x + 10, cy, 8,
-            st->fw_ready ? COLOR_TEXT_DIM : COLOR_AMBER);
+  /* --- Iki liste --- */
+  int lw = (w - 8) * 44 / 100;
+  if (lw < 380) lw = 380;
+  if (lw > w - 320) lw = w - 320;
+  sbui_draw_ip_list(x, list_y, lw, list_h);
+  sbui_draw_dom_list(x + lw + 8, list_y, w - lw - 8, list_h);
 
-  const char *msg = g_sb_status[0] ? g_sb_status
-                                   : "IP ve site secip toplu uygulayin.";
-  Color mcol = (GetTime() - g_sb_status_ts < 6.0) ? COLOR_TEXT_SEC
-                                                  : COLOR_TEXT_DIM;
-  sbui_draw_clipped(msg, x + 10, y + h - 18, w - 20, 8, mcol);
-}
+  if (bar_h <= 0) return;
 
-/* ---- Sag ust: gruplu karartma envanteri ---- */
-static int sbui_cmp_site(const void *pa, const void *pb) {
-  const SiteBlockRule *a = (const SiteBlockRule *)pa;
-  const SiteBlockRule *b = (const SiteBlockRule *)pb;
-  int c = strcmp(a->domain, b->domain);
-  if (c) return c;
-  return sbui_ip_cmp(a->ip, b->ip);
-}
+  /* --- Alt islem cubugu --- */
+  int by = y + h - bar_h;
+  DrawRoundedPanel((Rectangle){(float)x, (float)by, (float)w, (float)bar_h},
+                   COLOR_PANEL, ui_alpha(COLOR_BORDER, 150));
 
-static int sbui_cmp_ipv(const void *pa, const void *pb) {
-  const SiteBlockRule *a = (const SiteBlockRule *)pa;
-  const SiteBlockRule *b = (const SiteBlockRule *)pb;
-  int c = sbui_ip_cmp(a->ip, b->ip);
-  if (c) return c;
-  return strcmp(a->domain, b->domain);
-}
+  int nsel = sbui_sel_count_cur();
+  char b[160];
+  snprintf(b, sizeof(b), "Secili %d IP", nsel);
+  DrawTextC(b, x + 16, by + 18, 14,
+            nsel > 0 ? COLOR_CYAN : COLOR_TEXT_DIM);
+  DrawTextC(nsel > 0 ? "asagidaki siteye ban uygulanir"
+                     : "soldaki listeden IP isaretleyin",
+            x + 16, by + 42, 9, COLOR_TEXT_DIM);
 
-static int sbui_collect_rules(SiteBlockRule *out, int max) {
-  int n = 0;
-  int rc = site_block_rule_count();
-  if (rc > max) rc = max;
-  for (int i = 0; i < rc && n < max; i++) {
-    SiteBlockRule r;
-    if (site_block_get_rule(i, &r) != 0) continue;
-    if (g_sb_inv_filter[0] &&
-        !sbui_ci_contains(r.ip, g_sb_inv_filter) &&
-        !sbui_ci_contains(r.domain, g_sb_inv_filter))
-      continue;
-    out[n++] = r;
-  }
-  qsort(out, (size_t)n, sizeof(SiteBlockRule),
-        g_sb_inv_view == 0 ? sbui_cmp_site : sbui_cmp_ipv);
-  return n;
-}
-
-static int sbui_inv_total_h(const SiteBlockRule *r, int n) {
-  int h = 0, i = 0;
-  while (i < n) {
-    const char *key = sbui_group_key(&r[i]);
-    int j = i + 1;
-    while (j < n && strcmp(sbui_group_key(&r[j]), key) == 0) j++;
-    h += 24;
-    if (sbui_is_expanded(key)) h += (j - i) * 20;
-    i = j;
-  }
-  return h;
-}
-
-static void draw_sb_inventory(int x, int y, int w, int h, SiteBlockStats *st) {
-  (void)st;
-  DrawRoundedPanel((Rectangle){x, y, w, h}, COLOR_PANEL,
-                   ui_alpha(COLOR_BORDER, 150));
-  draw_panel_title(x + 10, y + 8, "KARARTMA ENVANTERI", 12, COLOR_RED);
-
-  char b[96];
-  snprintf(b, sizeof(b), "Kural: %d", site_block_rule_count());
-  DrawTextC(b, x + w - ui_text_w(b, 8) - 10, y + 10, 8, COLOR_TEXT_SEC);
-
-  Rectangle vb1 = {(float)(x + 10), (float)(y + 28), 86, 20};
-  Rectangle vb2 = {(float)(x + 100), (float)(y + 28), 86, 20};
-  if (sbui_seg_button(vb1, "Siteye Gore", g_sb_inv_view == 0, COLOR_RED)) {
-    g_sb_inv_view = 0;
-    g_sb_scroll_inv = 0;
-  }
-  if (sbui_seg_button(vb2, "IP'ye Gore", g_sb_inv_view == 1, COLOR_AMBER)) {
-    g_sb_inv_view = 1;
-    g_sb_scroll_inv = 0;
-  }
-
-  int mclick = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
-  int compact = (w < 430);
-  Rectangle isr = {compact ? (float)(x + 10) : (float)(x + w - 190),
-                   (float)(compact ? y + 52 : y + 27),
-                   (float)(compact ? w - 20 : 180), 20};
-  int ihov = CheckCollisionPointRec(GetMousePosition(), isr);
+  int bx = x + 214;
+  int bin_w = 400;
+  if (bin_w > w - 214 - 176 - 60) bin_w = w - 214 - 176 - 60;
+  if (bin_w < 140) bin_w = 140;
+  DrawTextC("Site:", bx, by + 12, 10, COLOR_TEXT_SEC);
+  Rectangle in = {(float)bx, (float)(by + 28), (float)bin_w, 30};
+  int ihov = CheckCollisionPointRec(GetMousePosition(), in);
   if (mclick && ihov) {
-    g_sb_inv_filter_active = 1;
-    g_sb_domain_active = 0;
-    g_sb_sinkhole_active = 0;
+    g_sb_domain_active = 1;
     g_sb_ip_filter_active = 0;
+    g_sb_dom_filter_active = 0;
+    g_sb_vis_filter_active = 0;
+    g_sb_sinkhole_active = 0;
   } else if (mclick && !ihov) {
-    g_sb_inv_filter_active = 0;
+    g_sb_domain_active = 0;
   }
-  GuiTextBox(isr, g_sb_inv_filter, (int)sizeof(g_sb_inv_filter),
-             g_sb_inv_filter_active != 0);
-  if (!g_sb_inv_filter[0] && !g_sb_inv_filter_active)
-    DrawTextC("site / IP ara...", (int)isr.x + 6, (int)isr.y + 5, 8,
-              ui_alpha(COLOR_TEXT_DIM, 160));
+  int entered = GuiTextBox(in, g_sb_domain, (int)sizeof(g_sb_domain),
+                           g_sb_domain_active != 0);
+  if (!g_sb_domain[0] && !g_sb_domain_active)
+    DrawTextC("ornek: instagram.com", (int)in.x + 9, (int)in.y + 10, 9,
+              ui_alpha(COLOR_TEXT_DIM, 150));
 
-  int list_top = y + 52 + (compact ? 24 : 0);
-  int list_h = h - (list_top - y) - 6;
-  if (list_h < 40) list_h = 40;
-  Rectangle area = {(float)(x + 6), (float)list_top, (float)(w - 12),
-                    (float)list_h};
+  Rectangle bb = {(float)(bx + bin_w + 10), (float)(by + 28), 160, 30};
+  if (sbui_action_button(bb, "BANLA", COLOR_RED,
+                         !g_sb_job.thread_live && nsel > 0 && g_sb_domain[0]))
+    sbui_do_ban();
+  if (entered && g_sb_domain[0] && nsel > 0) sbui_do_ban();
 
-  int n = sbui_collect_rules(g_sb_rules_snap, SB_MAX_RULES);
-  int content_h = sbui_inv_total_h(g_sb_rules_snap, n);
-  float max_scroll = (float)content_h - list_h;
-  if (max_scroll < 0) max_scroll = 0;
-  if (CheckCollisionPointRec(GetMousePosition(), area)) {
-    g_sb_scroll_inv -= GetMouseWheelMove() * 24.0f;
-    if (g_sb_scroll_inv < 0) g_sb_scroll_inv = 0;
-    if (g_sb_scroll_inv > max_scroll) g_sb_scroll_inv = max_scroll;
-  }
-
-  BeginScissorModeScaled((int)area.x, (int)area.y, (int)area.width,
-                         (int)area.height);
-  if (n == 0) {
-    DrawTextC(g_sb_inv_filter[0] ? "Filtreyle eslesen kural yok."
-                                 : "Henuz kural yok. Soldan IP, ortadan site secin.",
-              (int)area.x + 10, (int)area.y + 12, 9, COLOR_TEXT_DIM);
-  }
-
-  int yy = list_top - (int)g_sb_scroll_inv;
-  int i = 0;
-  while (i < n) {
-    const char *key = sbui_group_key(&g_sb_rules_snap[i]);
-    int j = i + 1;
-    while (j < n && strcmp(sbui_group_key(&g_sb_rules_snap[j]), key) == 0) j++;
-    int expanded = sbui_is_expanded(key);
-
-    if (yy + 22 >= list_top && yy <= list_top + list_h) {
-      Rectangle hr = {(float)(x + 8), (float)yy, (float)(w - 16), 22};
-      int hov = CheckCollisionPointRec(GetMousePosition(), hr);
-      DrawRectangleRounded(hr, 0.15f, 4,
-                           hov ? COLOR_PANEL_HOVER : COLOR_SURFACE);
-      if (expanded)
-        DrawRectangle((int)hr.x, (int)hr.y, 2, 20, COLOR_RED);
-
-      Vector2 c1 = {(float)(hr.x + 10), (float)(hr.y + 7)};
-      if (expanded) {
-        DrawTriangle(c1, (Vector2){c1.x + 8, c1.y},
-                     (Vector2){c1.x + 4, c1.y + 7}, COLOR_TEXT_SEC);
-      } else {
-        DrawTriangle((Vector2){c1.x, c1.y},
-                     (Vector2){c1.x, c1.y + 8},
-                     (Vector2){c1.x + 7, c1.y + 4}, COLOR_TEXT_SEC);
-      }
-
-      char kl[SB_DOMAIN_LEN + 24];
-      if (g_sb_inv_view == 1 && strcmp(key, "*") == 0)
-        snprintf(kl, sizeof(kl), "Tum IP'ler (joker)");
-      else
-        snprintf(kl, sizeof(kl), "%s", key);
-      int keyw = w - (w >= 430 ? 300 : 190);
-      if (keyw < 60) keyw = 60;
-      sbui_draw_clipped(kl, (int)hr.x + 22, (int)hr.y + 6, keyw, 10,
-                        (g_sb_inv_view == 1 && strcmp(key, "*") == 0)
-                            ? COLOR_RED
-                            : COLOR_TEXT);
-
-      unsigned long ghits = 0;
-      for (int k = i; k < j; k++) ghits += g_sb_rules_snap[k].hits;
-      if (w >= 430) {
-        snprintf(b, sizeof(b), "%d %s", j - i,
-                 g_sb_inv_view == 0 ? "IP" : "site");
-        DrawTextC(b, x + w - 266, yy + 7, 8, COLOR_TEXT_DIM);
-        snprintf(b, sizeof(b), "%lu hit", ghits);
-        DrawTextC(b, x + w - 194, yy + 7, 8, COLOR_TEXT_DIM);
-      }
-
-      char ck[160];
-      snprintf(ck, sizeof(ck), "%d|%s", g_sb_inv_view, key);
-      int armed = (strcmp(g_sb_confirm_key, ck) == 0 &&
-                   GetTime() - g_sb_confirm_ts < 3.0);
-      Rectangle rb = {(float)(x + w - 102), (float)(yy + 3), 90, 16};
-      if (sbui_mini_button(rb, armed ? "Emin misin?" : "Tumunu Kaldir",
-                           COLOR_RED, !g_sb_job.thread_live)) {
-        if (armed) {
-          g_sb_confirm_key[0] = '\0';
-          sbui_start_remove_rules(&g_sb_rules_snap[i], j - i);
-        } else {
-          strncpy(g_sb_confirm_key, ck, sizeof(g_sb_confirm_key) - 1);
-          g_sb_confirm_key[sizeof(g_sb_confirm_key) - 1] = '\0';
-          g_sb_confirm_ts = GetTime();
-        }
-      } else if (hov && mclick &&
-                 !CheckCollisionPointRec(GetMousePosition(), rb)) {
-        sbui_exp_toggle(key);
-      }
+  if (g_sb_job.thread_live) {
+    int processed = g_sb_job.processed;
+    int total = g_sb_job.total;
+    float pct = total > 0 ? (float)processed / (float)total : 0;
+    char cur[sizeof(g_sb_job.current)];
+    pthread_mutex_lock(&g_sb_job.lock);
+    snprintf(cur, sizeof(cur), "%s", g_sb_job.current);
+    pthread_mutex_unlock(&g_sb_job.lock);
+    int sx = (int)(bb.x + bb.width + 16);
+    int sw2 = x + w - 16 - sx;
+    if (sw2 > 60) {
+      snprintf(b, sizeof(b), "%d / %d", processed, total);
+      DrawTextC(b, sx, by + 14, 10, COLOR_TEXT);
+      if (sbui_mini_button((Rectangle){x + w - 96, by + 10, 80, 18}, "IPTAL",
+                           COLOR_RED, 1))
+        g_sb_job.cancel = 1;
+      sbui_progress_bar((Rectangle){(float)sx, (float)(by + 34),
+                                    (float)(sw2 > 420 ? 420 : sw2), 8},
+                        pct, COLOR_RED);
+      sbui_draw_clipped(cur, sx, by + 48, sw2 - 90, 8, COLOR_TEXT_DIM);
     }
-    yy += 24;
-
-    if (expanded) {
-      for (int k = i; k < j; k++) {
-        if (yy + 19 >= list_top && yy <= list_top + list_h) {
-          SiteBlockRule *r = &g_sb_rules_snap[k];
-          Rectangle cr = {(float)(x + 14), (float)yy, (float)(w - 20), 19};
-          int hov = CheckCollisionPointRec(GetMousePosition(), cr);
-          if (hov)
-            DrawRectangleRounded(cr, 0.15f, 3, ui_alpha(COLOR_PANEL_HOVER, 180));
-          const char *sub = (g_sb_inv_view == 0) ? r->ip : r->domain;
-          int subw = w - (w >= 430 ? 260 : 150);
-          if (subw < 50) subw = 50;
-          sbui_draw_clipped(sub, (int)cr.x + 14, (int)cr.y + 5, subw, 9,
-                            COLOR_TEXT);
-          const char *mode = (r->mode == SB_MODE_SINKHOLE) ? "DNS"
-                              : (r->mode == SB_MODE_RST) ? "RST" : "IKI";
-          if (w >= 430) {
-            DrawTextC(mode, x + w - 212, yy + 5, 8, COLOR_TEXT_DIM);
-            snprintf(b, sizeof(b), "%lu", r->hits);
-            DrawTextC(b, x + w - 175, yy + 5, 8, COLOR_TEXT_DIM);
-          }
-          Rectangle xb = {(float)(x + w - 70), (float)(yy + 2), 56, 15};
-          if (sbui_mini_button(xb, "Kaldir", COLOR_RED,
-                               !g_sb_job.thread_live))
-            sbui_remove_one(r->ip, r->domain);
-        }
-        yy += 20;
-      }
-    }
-    i = j;
+  } else if (g_sb_status[0]) {
+    int sx = (int)(bb.x + bb.width + 16);
+    int sw2 = x + w - 16 - sx;
+    if (sw2 > 60)
+      sbui_draw_clipped(g_sb_status, sx, by + 12, sw2, 9,
+                        (GetTime() - g_sb_status_ts < 8.0) ? COLOR_TEXT_SEC
+                                                           : COLOR_TEXT_DIM);
   }
-  EndScissorMode();
-  draw_custom_scrollbar((float)(x + w - 9), (float)list_top, 7.0f,
-                        (float)list_h, (float)content_h, &g_sb_scroll_inv);
 }
 
-/* ---- Sag alt: ziyaret edilen siteler ---- */
-static int sbui_obs_visible(const char *ip) {
-  if (g_sb_joker_sel) return 1;
-  int any = 0;
-  for (int i = 0; i < g_mon_count; i++) {
-    if (sbui_sel_has(g_mon_ips[i]) && !sbui_exc_has(g_mon_ips[i])) {
-      any = 1;
-      break;
-    }
-  }
-  if (!any) return 1;
-  for (int i = 0; i < g_mon_count; i++) {
-    if (strcmp(g_mon_ips[i], ip) == 0)
-      return sbui_sel_has(ip) && !sbui_exc_has(ip);
-  }
-  return 0;
-}
+/* ------------------------------------------------------------------
+ *  Ziyaretler
+ * ------------------------------------------------------------------ */
+static void sbui_draw_visits(int x, int y, int w, int h) {
+  DrawRoundedPanel((Rectangle){(float)x, (float)y, (float)w, (float)h},
+                   COLOR_PANEL, ui_alpha(COLOR_BORDER, 150));
+  draw_panel_title(x + 12, y + 10, "ZIYARET EDILEN SITELER", 12, COLOR_GREEN);
 
-static void draw_sb_obs(int x, int y, int w, int h) {
-  DrawRoundedPanel((Rectangle){x, y, w, h}, COLOR_PANEL,
-                   ui_alpha(COLOR_BORDER, 150));
-  draw_panel_title(x + 10, y + 8, "ZIYARET EDILEN SITELER", 11,
-                   COLOR_GREEN);
-
-  int any_sel = 0;
-  for (int i = 0; i < g_mon_count; i++) {
-    if (sbui_sel_has(g_mon_ips[i]) && !sbui_exc_has(g_mon_ips[i])) {
-      any_sel = 1;
-      break;
-    }
-  }
-  const char *flt = (g_sb_joker_sel || !any_sel) ? "Tum IP'ler" : "Secili IP'ler";
-  DrawTextC(flt, x + w - ui_text_w(flt, 8) - 76, y + 10, 8, COLOR_TEXT_DIM);
-
+  if (g_sb_vis_sel > g_mon_count) g_sb_vis_sel = 0;
   int mclick = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
-  if (sbui_mini_button((Rectangle){x + w - 62, y + 6, 52, 16}, "Temizle",
+
+  if (sbui_mini_button((Rectangle){x + w - 66, y + 9, 54, 18}, "Temizle",
                        COLOR_TEXT_DIM, 1)) {
     site_block_clear_observations();
     sbui_status_set("Gozlem listesi temizlendi.");
@@ -3283,50 +2958,114 @@ static void draw_sb_obs(int x, int y, int w, int h) {
 
   SiteBlockObs obs[SB_OBS_MAX];
   int n = site_block_observations(obs, SB_OBS_MAX);
-  int vis = 0;
-  for (int i = 0; i < n; i++)
-    if (sbui_obs_visible(obs[i].ip)) vis++;
 
-  int list_top = y + 28;
-  int list_h = h - 34;
-  if (list_h < 30) list_h = 30;
+  const char *cur = (g_sb_vis_sel == 0) ? "Tum IP'ler"
+                                        : g_mon_ips[g_sb_vis_sel - 1];
+  Rectangle db = {(float)(x + 12), (float)(y + 32), 210, 24};
+  int dh = CheckCollisionPointRec(GetMousePosition(), db);
+  DrawRectangleRounded(db, 0.25f, 4, dh ? COLOR_PANEL_HOVER : COLOR_SURFACE);
+  DrawRectangleRoundedLinesEx(db, 0.25f, 4, 1.0f,
+                              ui_alpha(COLOR_BORDER, 150));
+  sbui_draw_clipped(cur, (int)db.x + 9, (int)db.y + 8, (int)db.width - 30, 9,
+                    COLOR_TEXT);
+  DrawTriangle((Vector2){db.x + db.width - 16, db.y + 10},
+               (Vector2){db.x + db.width - 8, db.y + 10},
+               (Vector2){db.x + db.width - 12, db.y + 15}, COLOR_TEXT_SEC);
+  if (dh && mclick) {
+    g_sb_vis_open = !g_sb_vis_open;
+    g_sb_domain_active = 0;
+    g_sb_ip_filter_active = 0;
+    g_sb_dom_filter_active = 0;
+  }
+
+  int sw = 260;
+  Rectangle sr = {(float)(x + w - sw - 12), (float)(y + 32), (float)sw, 24};
+  int shov = CheckCollisionPointRec(GetMousePosition(), sr);
+  if (mclick && shov) {
+    g_sb_vis_filter_active = 1;
+    g_sb_domain_active = 0;
+    g_sb_ip_filter_active = 0;
+    g_sb_dom_filter_active = 0;
+  } else if (mclick && !shov) {
+    g_sb_vis_filter_active = 0;
+  }
+  GuiTextBox(sr, g_sb_vis_filter, (int)sizeof(g_sb_vis_filter),
+             g_sb_vis_filter_active != 0);
+  if (!g_sb_vis_filter[0] && !g_sb_vis_filter_active)
+    DrawTextC("site veya IP ara...", (int)sr.x + 8, (int)sr.y + 7, 9,
+              ui_alpha(COLOR_TEXT_DIM, 160));
+
+  /* Acilir listenin kapladigi alan: altindaki satirlar hover ALMAZ */
+  Rectangle dd = {0, 0, 0, 0};
+  if (g_sb_vis_open) {
+    int items = g_mon_count + 1;
+    int fullh = items * 22;
+    int listh = fullh < 240 ? fullh : 240;
+    dd = (Rectangle){db.x, db.y + db.height + 3, 240.0f, (float)listh + 8};
+    if (dd.x + dd.width > x + w - 8) dd.x = (float)(x + w - 8 - dd.width);
+  }
+  int over_dd = g_sb_vis_open &&
+                CheckCollisionPointRec(GetMousePosition(), dd);
+
+  int vis = 0;
+  for (int i = 0; i < n; i++) {
+    if (g_sb_vis_sel > 0 && strcmp(obs[i].ip, g_mon_ips[g_sb_vis_sel - 1]) != 0)
+      continue;
+    if (g_sb_vis_filter[0] && !sbui_ci_contains(obs[i].domain, g_sb_vis_filter) &&
+        !sbui_ci_contains(obs[i].ip, g_sb_vis_filter))
+      continue;
+    vis++;
+  }
+
+  int list_top = y + 64;
+  int list_h = h - (list_top - y) - 10;
+  if (list_h < 40) list_h = 40;
   Rectangle area = {(float)(x + 6), (float)list_top, (float)(w - 12),
                     (float)list_h};
-  float content_h = (float)vis * 20.0f;
+  float content_h = (float)vis * 22.0f;
   float max_scroll = content_h - list_h;
   if (max_scroll < 0) max_scroll = 0;
-  if (CheckCollisionPointRec(GetMousePosition(), area)) {
-    g_sb_scroll_obs -= GetMouseWheelMove() * 20.0f;
-    if (g_sb_scroll_obs < 0) g_sb_scroll_obs = 0;
-    if (g_sb_scroll_obs > max_scroll) g_sb_scroll_obs = max_scroll;
+  if (CheckCollisionPointRec(GetMousePosition(), area) && !over_dd) {
+    g_sb_scroll_vis -= GetMouseWheelMove() * 22.0f;
+    if (g_sb_scroll_vis < 0) g_sb_scroll_vis = 0;
+    if (g_sb_scroll_vis > max_scroll) g_sb_scroll_vis = max_scroll;
   }
 
   BeginScissorModeScaled((int)area.x, (int)area.y, (int)area.width,
                          (int)area.height);
   if (vis == 0) {
-    DrawTextC("Gozlem yok. Trafik izlemeyi baslatip cihazlari gezinin.",
-              x + 16, list_top + 8, 8, COLOR_TEXT_DIM);
+    DrawTextC(n == 0
+                  ? "Gozlem yok. Kontrol Paneli'nden trafik izlemeyi baslatip cihazlari gezin."
+                  : "Bu filtreyle eslesen ziyaret yok.",
+              (int)area.x + 12, (int)area.y + 12, 10, COLOR_TEXT_DIM);
   }
-  int yy = list_top - (int)g_sb_scroll_obs;
-  char b[128];
+  int yy = list_top - (int)g_sb_scroll_vis;
+  char b[96];
   for (int i = 0; i < n; i++) {
-    if (!sbui_obs_visible(obs[i].ip)) continue;
-    if (yy + 19 >= list_top && yy <= list_top + list_h) {
-      Rectangle row = {(float)(x + 10), (float)yy, (float)(w - 20), 19};
-      int hov = CheckCollisionPointRec(GetMousePosition(), row);
+    if (g_sb_vis_sel > 0 && strcmp(obs[i].ip, g_mon_ips[g_sb_vis_sel - 1]) != 0)
+      continue;
+    if (g_sb_vis_filter[0] && !sbui_ci_contains(obs[i].domain, g_sb_vis_filter) &&
+        !sbui_ci_contains(obs[i].ip, g_sb_vis_filter))
+      continue;
+    if (yy + 21 >= list_top && yy <= list_top + list_h) {
+      Rectangle row = {(float)(x + 10), (float)yy, (float)(w - 20), 21};
+      int hov = !over_dd && CheckCollisionPointRec(GetMousePosition(), row);
       if (hov)
-        DrawRectangleRounded(row, 0.15f, 3, ui_alpha(COLOR_PANEL_HOVER, 180));
-      DrawTextC(obs[i].ip, (int)row.x + 4, yy + 5, 8, COLOR_TEXT_SEC);
-      int domw = w - 170;
-      if (domw < 40) domw = 40;
-      sbui_draw_clipped(obs[i].domain, (int)row.x + 108, yy + 5, domw, 8,
-                        obs[i].blocked ? COLOR_RED : COLOR_TEXT);
+        DrawRectangleRounded(row, 0.12f, 3, ui_alpha(COLOR_PANEL_HOVER, 170));
+      DrawTextC(obs[i].ip, (int)row.x + 8, (int)row.y + 6, 9, COLOR_TEXT_SEC);
+      int domw = w - 420;
+      if (domw < 60) domw = 60;
+      sbui_draw_clipped(obs[i].domain, (int)row.x + 130, (int)row.y + 6, domw,
+                        10, obs[i].blocked ? COLOR_RED : COLOR_TEXT);
       snprintf(b, sizeof(b), "x%lu", obs[i].count);
-      DrawTextC(b, x + w - 160, yy + 5, 7, COLOR_TEXT_DIM);
+      DrawTextC(b, x + w - 250, yy + 6, 8, COLOR_TEXT_DIM);
+      if (obs[i].blocked)
+        DrawTextC("BLOK", x + w - 200, yy + 6, 8, COLOR_RED);
 
-      Rectangle bb = {(float)(x + w - 66), (float)(yy + 2), 54, 15};
+      Rectangle bb = {(float)(x + w - 130), (float)(yy + 3), 96, 16};
       int blocked = obs[i].blocked;
-      if (sbui_mini_button(bb, blocked ? "AC" : "BLOK",
+      if (!over_dd &&
+          sbui_mini_button(bb, blocked ? "ENGELI AC" : "BLOKLA",
                            blocked ? COLOR_AMBER : COLOR_RED,
                            !g_sb_job.thread_live)) {
         if (blocked) {
@@ -3338,39 +3077,97 @@ static void draw_sb_obs(int x, int y, int w, int h) {
         }
       }
     }
-    yy += 20;
+    yy += 22;
   }
   EndScissorMode();
   draw_custom_scrollbar((float)(x + w - 9), (float)list_top, 7.0f,
-                        (float)list_h, content_h, &g_sb_scroll_obs);
-  (void)mclick;
+                        (float)list_h, content_h, &g_sb_scroll_vis);
+
+  if (g_sb_status[0])
+    sbui_draw_clipped(g_sb_status, x + 12, y + h - 18, w - 24, 9,
+                      (GetTime() - g_sb_status_ts < 8.0) ? COLOR_TEXT_SEC
+                                                         : COLOR_TEXT_DIM);
+
+  /* IP secim listesi en ustte */
+  if (g_sb_vis_open) {
+    int items = g_mon_count + 1;
+    int fullh = items * 22;
+    float dmax = (float)fullh - (dd.height - 8);
+    if (dmax < 0) dmax = 0;
+    if (CheckCollisionPointRec(GetMousePosition(), dd)) {
+      g_sb_vis_dd_scroll -= GetMouseWheelMove() * 22.0f;
+      if (g_sb_vis_dd_scroll < 0) g_sb_vis_dd_scroll = 0;
+      if (g_sb_vis_dd_scroll > dmax) g_sb_vis_dd_scroll = dmax;
+    }
+    DrawRectangleRounded(dd, 0.05f, 4, (Color){10, 14, 22, 255});
+    DrawRectangleRoundedLinesEx(dd, 0.05f, 4, 1.0f,
+                                ui_alpha(COLOR_ACCENT, 130));
+    BeginScissorModeScaled((int)dd.x + 1, (int)dd.y + 1, (int)dd.width - 2,
+                           (int)dd.height - 2);
+    int ry = (int)dd.y + 4 - (int)g_sb_vis_dd_scroll;
+    for (int i = 0; i < items; i++) {
+      const char *lbl = (i == 0) ? "Tum IP'ler" : g_mon_ips[i - 1];
+      Rectangle ir = {(float)(dd.x + 2), (float)ry, (float)(dd.width - 4), 22};
+      int ih = CheckCollisionPointRec(GetMousePosition(), ir);
+      if (i == g_sb_vis_sel)
+        DrawRectangleRounded(ir, 0.1f, 3, ui_alpha(COLOR_GREEN, 28));
+      else if (ih)
+        DrawRectangleRounded(ir, 0.1f, 3, COLOR_PANEL_HOVER);
+      DrawTextC(lbl, (int)ir.x + 8, (int)ir.y + 6, 9,
+                i == g_sb_vis_sel ? COLOR_GREEN : COLOR_TEXT);
+      if (ih && mclick) {
+        g_sb_vis_sel = i;
+        g_sb_vis_open = 0;
+        g_sb_scroll_vis = 0;
+      }
+      ry += 22;
+    }
+    EndScissorMode();
+    if (dmax > 0)
+      draw_custom_scrollbar((float)(dd.x + dd.width - 8), dd.y + 4, 6.0f,
+                            dd.height - 8, (float)fullh, &g_sb_vis_dd_scroll);
+
+    if (mclick && !CheckCollisionPointRec(GetMousePosition(), dd) &&
+        !CheckCollisionPointRec(GetMousePosition(), db))
+      g_sb_vis_open = 0;
+  }
 }
 
-/* ---- Site Karartma sekmesi (yeni yerlesim) ---- */
-static void draw_site_block_tab(int W, int py, int panel_h) {
+/* ------------------------------------------------------------------ */
+static void draw_panel_site_block(int W, int H) {
   sbui_job_reap();
-  sbui_prune_lists();
+  sbui_prune_sel();
 
-  SiteBlockStats st;
-  site_block_get_stats(&st);
+  int y0 = 86;
+  const char *labels[2] = {"KARARTMA", "ZIYARETLER"};
+  Color cols[2] = {COLOR_RED, COLOR_GREEN};
+  int tw = 200;
+  for (int i = 0; i < 2; i++) {
+    Rectangle r = {(float)(16 + i * (tw + 6)), (float)y0, (float)tw, 26};
+    if (sbui_seg_button(r, labels[i], g_sb_subtab == i, cols[i])) {
+      g_sb_subtab = i;
+      g_sb_vis_open = 0;
+    }
+  }
 
-  int gap = 8;
-  int wL = 300, wC = 300;
-  if (W < 1180) { wL = 260; wC = 270; }
-  if (W < 980)  { wL = 230; wC = 240; }
-  int wR = W - 24 - wL - wC - 16;
-  if (wR < 240) wR = 240;
+  int en = site_block_is_enabled();
+  char b[96];
+  snprintf(b, sizeof(b), "%d kural", site_block_rule_count());
+  DrawTextC(b, W - 200, y0 + 8, 9, COLOR_TEXT_SEC);
+  draw_led((float)(W - 128), (float)(y0 + 13), 3.0f,
+           en ? COLOR_GREEN : COLOR_RED, en);
+  DrawTextC(en ? "ACIK" : "KAPALI", W - 120, y0 + 8, 9,
+            en ? COLOR_GREEN : COLOR_TEXT_DIM);
+  if (sbui_mini_button((Rectangle){(float)(W - 66), (float)(y0 + 4), 50, 18},
+                       en ? "Kapat" : "Ac", en ? COLOR_RED : COLOR_GREEN, 1)) {
+    site_block_set_enabled(!en);
+    sbui_status_set(en ? "Site karartma kapatildi." : "Site karartma acildi.");
+  }
 
-  int xL = 12;
-  int xC = xL + wL + gap;
-  int xR = xC + wC + gap;
-
-  draw_sb_left(xL, py, wL, panel_h);
-  draw_sb_center(xC, py, wC, panel_h, &st);
-
-  int inv_h = (panel_h - gap) * 62 / 100;
-  draw_sb_inventory(xR, py, wR, inv_h, &st);
-  draw_sb_obs(xR, py + inv_h + gap, wR, panel_h - gap - inv_h);
+  int py = y0 + 34;
+  int ph = H - py - 12;
+  if (g_sb_subtab == 0) sbui_draw_main(16, py, W - 32, ph);
+  else sbui_draw_visits(16, py, W - 32, ph);
 }
 
 /* ========== Araclar Paneli ========== */
@@ -3378,10 +3175,10 @@ static void draw_panel_tools(int W, int H) {
   int y0 = 86;
 
   /* --- Alt sekmeler (segment kontrol) --- */
-  const char *stabs[] = {"Paket İzleme", "Site Karartma", "Port Tarayıcı"};
-  Color sclr[] = {COLOR_CYAN, COLOR_RED, COLOR_ACCENT2};
+  const char *stabs[] = {"Paket İzleme", "Port Tarayıcı"};
+  Color sclr[] = {COLOR_CYAN, COLOR_ACCENT2};
   int stx = 16;
-  for (int i = 0; i < 3; i++) {
+  for (int i = 0; i < 2; i++) {
     int sw = MeasureText(stabs[i], 12) + 30;
     Rectangle sb = {(float)stx, (float)y0, (float)sw, 24};
     int sh = CheckCollisionPointRec(GetMousePosition(), sb);
@@ -4177,11 +3974,6 @@ static void draw_panel_tools(int W, int H) {
 
 
   else if (g_tools_subtab == 1) {
-    /* === Site Karartma (toplu islem + gruplu envanter) === */
-    draw_site_block_tab(W, py, panel_h);
-  }
-
-  else if (g_tools_subtab == 2) {
     /* === Port Tarayici === */
     int ctrl_w = 260;
     int result_w = W - 24 - ctrl_w - 8;
@@ -4758,6 +4550,9 @@ void gui_draw(void) {
     break;
   case TAB_TOOLS:
     draw_panel_tools(V_WIDTH, V_HEIGHT);
+    break;
+  case TAB_SITE_BLOCK:
+    draw_panel_site_block(V_WIDTH, V_HEIGHT);
     break;
   case TAB_SENTINEL:
     draw_panel_sentinel(V_WIDTH, V_HEIGHT);

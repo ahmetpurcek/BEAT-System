@@ -53,7 +53,6 @@ static PortScanResults g_portscan;
 static float g_scroll_nm_flows = 0;
 static float g_scroll_device_detail = 0;
 
-static int g_tools_subtab = 0;         /* 0=Paket Izleme, 1=Port Tarayici */
 static float g_scroll_tool_ports = 0;
 static int g_selected_packet_num = -1;
 static float g_scroll_pdu_detail = 0;
@@ -443,7 +442,7 @@ static void draw_custom_scrollbar(float x, float y, float w, float view_h,
   }
 
   float thumb_y = y + (*scroll / max_scroll) * (view_h - thumb);
-  DrawRectangleRounded(track, 0.5f, 4, (Color){20, 28, 44, 60});
+  DrawRectangleRounded(track, 0.5f, 4, (Color){16, 16, 18, 90});
   DrawRectangleRounded((Rectangle){x, thumb_y, w, thumb}, 0.5f, 4,
                        COLOR_SCROLLBAR);
 }
@@ -570,10 +569,10 @@ static int draw_cam_btn(Rectangle r, const char *label, Color accent, int enable
   int hov = enabled && CheckCollisionPointRec(mp, r);
   DrawRectangleRounded(r, 0.28f, 4,
                        enabled ? ui_alpha(accent, hov ? 64 : 26)
-                               : (Color){30, 36, 50, 170});
+                               : (Color){22, 22, 24, 180});
   DrawRectangleRoundedLinesEx(r, 0.28f, 4, 1.0f,
                               enabled ? ui_alpha(accent, hov ? 220 : 150)
-                                      : (Color){60, 70, 90, 110});
+                                      : (Color){72, 66, 62, 120});
   int tw = gc_text_w(label, 10);
   int inner = (int)r.width - 8;
   /* Etiket sığmıyorsa kıs */
@@ -940,7 +939,7 @@ void gui_camera_draw_list_panel(int rx, int ry, int rw, int rh) {
     DrawTextC(line, rx+10, ry+88, 8, COLOR_TEXT_DIM);
     if (res.is_scanning) {
       Rectangle pb = {(float)(rx+10),(float)(ry+99),(float)(rw-20),4};
-      DrawRectangleRounded(pb,0.5f,4,(Color){30,40,60,200});
+      DrawRectangleRounded(pb,0.5f,4,(Color){18, 18, 20, 210});
       Rectangle pf = pb; pf.width = (rw-20)*(res.progress/100.0f);
       DrawRectangleRounded(pf,0.5f,4,COLOR_ACCENT);
     }
@@ -1042,7 +1041,7 @@ static void draw_header(int W) {
     int ipw = MeasureText(chip, 9) + 18;
     int ipx = stx - 18 - ipw - 10; /* 18: durum LED'i icin bosluk */
     DrawRectangleRounded((Rectangle){(float)ipx, 14, (float)ipw, 20}, 0.5f, 4,
-                         (Color){12, 18, 30, 255});
+                         COLOR_HEADER_BG);
     DrawRectangleRoundedLinesEx(
         (Rectangle){(float)ipx, 14, (float)ipw, 20}, 0.5f, 4, 1.0f,
         ui_alpha(COLOR_ACCENT, 60));
@@ -1058,11 +1057,11 @@ static void draw_header(int W) {
 /* ========== Tab Bar ========== */
 static void draw_tabs(int W) {
   int y = 50;
-  DrawRectangle(0, y, W, 32, (Color){7, 9, 15, 255});
+  DrawRectangle(0, y, W, 32, COLOR_HEADER_BG);
   DrawRectangle(0, y + 31, W, 1, ui_alpha(COLOR_BORDER, 120));
 
-  const char *labels[] = {"Kontrol Paneli", "Alarm Merkezi", "Araçlar",
-                            "Site Karartma", "SENTINEL"};
+  const char *labels[] = {"Kontrol Paneli", "Alarm Merkezi", "Paket İzleme",
+                            "Port Tarayıcı", "Site Karartma", "SENTINEL"};
   int tx = 12;
   for (int i = 0; i < (int)TAB_COUNT; i++) {
     int tw = MeasureText(labels[i], 13) + 30;
@@ -1601,7 +1600,7 @@ static void draw_right_panel_logs(int rx, int ry, int rw, int rh) {
                        ui_alpha(COLOR_BORDER, 120));
 
   /* Terminal usti cubugu */
-  DrawRectangle(rx + 10, ry + 32, rw - 20, 16, (Color){10, 14, 22, 255});
+  DrawRectangle(rx + 10, ry + 32, rw - 20, 16, COLOR_TERMINAL_BG);
   DrawCircle(rx + 21, ry + 40, 3, COLOR_RED);
   DrawCircle(rx + 30, ry + 40, 3, COLOR_AMBER);
   DrawCircle(rx + 39, ry + 40, 3, COLOR_GREEN);
@@ -3099,7 +3098,7 @@ static void sbui_draw_visits(int x, int y, int w, int h) {
       if (g_sb_vis_dd_scroll < 0) g_sb_vis_dd_scroll = 0;
       if (g_sb_vis_dd_scroll > dmax) g_sb_vis_dd_scroll = dmax;
     }
-    DrawRectangleRounded(dd, 0.05f, 4, (Color){10, 14, 22, 255});
+    DrawRectangleRounded(dd, 0.05f, 4, COLOR_TERMINAL_BG);
     DrawRectangleRoundedLinesEx(dd, 0.05f, 4, 1.0f,
                                 ui_alpha(COLOR_ACCENT, 130));
     BeginScissorModeScaled((int)dd.x + 1, (int)dd.y + 1, (int)dd.width - 2,
@@ -3170,40 +3169,13 @@ static void draw_panel_site_block(int W, int H) {
   else sbui_draw_visits(16, py, W - 32, ph);
 }
 
-/* ========== Araclar Paneli ========== */
-static void draw_panel_tools(int W, int H) {
-  int y0 = 86;
-
-  /* --- Alt sekmeler (segment kontrol) --- */
-  const char *stabs[] = {"Paket İzleme", "Port Tarayıcı"};
-  Color sclr[] = {COLOR_CYAN, COLOR_ACCENT2};
-  int stx = 16;
-  for (int i = 0; i < 2; i++) {
-    int sw = MeasureText(stabs[i], 12) + 30;
-    Rectangle sb = {(float)stx, (float)y0, (float)sw, 24};
-    int sh = CheckCollisionPointRec(GetMousePosition(), sb);
-    if (i == g_tools_subtab) {
-      DrawRectangleRounded(sb, 0.45f, 4, COLOR_SELECTED);
-      DrawRectangleRoundedLinesEx(sb, 0.45f, 4, 1.0f, ui_alpha(sclr[i], 150));
-      DrawTextC(stabs[i], sb.x + 14, sb.y + 6, 12, COLOR_TEXT);
-      DrawRectangle((int)sb.x + 8, (int)sb.y + 22, sw - 16, 2, sclr[i]);
-    } else {
-      if (sh)
-        DrawRectangleRounded(sb, 0.45f, 4, (Color){255, 255, 255, 8});
-      DrawTextC(stabs[i], sb.x + 14, sb.y + 6, 12,
-                sh ? COLOR_TEXT_SEC : COLOR_TEXT_DIM);
-    }
-    if (sh && IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
-      g_tools_subtab = i;
-    stx += sw + 6;
-  }
-
-  int py = y0 + 34;
+/* ========== Paket Izleme ========== */
+static void draw_panel_packets(int W, int H) {
+  int py = 86;
   int panel_h = H - py - 12;
   char buf[256];
 
-  if (g_tools_subtab == 0) {
-    /* === Paket Izleme (Network Monitor) === */
+  {
     int ctrl_w = 260;
     int result_w = W - 24 - ctrl_w - 8;
 
@@ -3229,7 +3201,7 @@ static void draw_panel_tools(int W, int H) {
       const char *mstr = (mode == 2) ? "PCAP" : (mode == 1) ? "PROCFS" : "KAPALI";
       Color mc = (mode == 2) ? COLOR_GREEN
                 : (mode == 1) ? COLOR_AMBER
-                : (Color){96, 104, 128, 255};
+                : (Color){120, 114, 108, 255};
       draw_led(30, cy + 6, 4, mc, mode != 0);
       DrawTextC("Mod:", 40, cy + 1, 9, COLOR_TEXT_DIM);
       DrawTextC(mstr, 40 + MeasureText("Mod:", 9) + 8, cy + 1, 9, mc);
@@ -3400,9 +3372,9 @@ static void draw_panel_tools(int W, int H) {
         DrawRectangleRounded(box, 0.25f, 4, COLOR_GREEN);
         /* Tik isareti (font ASCII sinirinda, cizgi ile ciz) */
         DrawLine((int)box.x + 2, (int)box.y + 6, (int)box.x + 5,
-                 (int)box.y + 9, (Color){10, 14, 24, 255});
+                 (int)box.y + 9, COLOR_TERMINAL_BG);
         DrawLine((int)box.x + 5, (int)box.y + 9, (int)box.x + 9,
-                 (int)box.y + 3, (Color){10, 14, 24, 255});
+                 (int)box.y + 3, COLOR_TERMINAL_BG);
       } else {
         DrawRectangleRoundedLinesEx(box, 0.25f, 4, 1.0f,
                                     ui_alpha(COLOR_BORDER, 150));
@@ -3562,11 +3534,11 @@ static void draw_panel_tools(int W, int H) {
       for (int i = 0; i < 12; i++) {
         int idx = nt - 1 - i;
         int sx = 24 + i * 14 + 3;
-        Color sc = (Color){44, 50, 68, 255};
+        Color sc = (Color){58, 56, 54, 255};
         if (idx >= 0) {
           const char *pr = atoks[idx] ? strrchr(atoks[idx], '|') : NULL;
           pr = pr ? pr + 1 : "";
-          sc = (idx < nslots) ? proto_color(pr) : (Color){44, 50, 68, 255};
+          sc = (idx < nslots) ? proto_color(pr) : (Color){58, 56, 54, 255};
         }
         DrawCircle(sx, ly + 22, 3.5f, sc);
       }
@@ -3756,7 +3728,7 @@ static void draw_panel_tools(int W, int H) {
           int hover = CheckCollisionPointRec(GetMousePosition(), pr);
           Color rbg =
               hover ? COLOR_PANEL_HOVER
-                    : ((i % 2 == 0) ? (Color){13, 17, 28, 255} : COLOR_SURFACE);
+                    : ((i % 2 == 0) ? (Color){18, 18, 20, 255} : COLOR_SURFACE);
           DrawRectangleRec(pr, rbg);
 
           Color pc = proto_color(p->protocol);
@@ -3969,12 +3941,15 @@ static void draw_panel_tools(int W, int H) {
       }
     }
   }
+}
 
+/* ========== Port Tarayici ========== */
+static void draw_panel_ports(int W, int H) {
+  int py = 86;
+  int panel_h = H - py - 12;
+  char buf[256];
 
-
-
-  else if (g_tools_subtab == 1) {
-    /* === Port Tarayici === */
+  {
     int ctrl_w = 260;
     int result_w = W - 24 - ctrl_w - 8;
 
@@ -4082,7 +4057,7 @@ static void draw_panel_tools(int W, int H) {
                 COLOR_TEXT_DIM);
       cy += 18;
       DrawRectangleRounded((Rectangle){24, cy, pbar_w, 18}, 0.5f, 4,
-                           (Color){16, 22, 36, 255});
+                           (Color){16, 16, 18, 255});
       DrawRectangleRoundedLinesEx((Rectangle){24, cy, pbar_w, 18}, 0.5f, 4,
                                   1.0f, ui_alpha(COLOR_BORDER, 110));
       if (prog > 0.005f)
@@ -4224,7 +4199,7 @@ static void draw_panel_tools(int W, int H) {
           int hov = CheckCollisionPointRec(GetMousePosition(), rr);
           Color rbg =
               hov ? COLOR_PANEL_HOVER
-                  : ((i % 2 == 0) ? (Color){13, 17, 28, 255} : COLOR_SURFACE);
+                  : ((i % 2 == 0) ? (Color){18, 18, 20, 255} : COLOR_SURFACE);
           if (expanded)
             rbg = ui_mix(rbg, COLOR_ACCENT2, 0.08f);
           DrawRectangleRec(rr, rbg);
@@ -4361,7 +4336,7 @@ void gui_init(int width, int height) {
 
   SetTargetFPS(30);
 
-  /* raygui style — siyah temaya uygun */
+  /* raygui style — koyu gri / siyah tema */
   GuiSetStyle(DEFAULT, TEXT_SIZE, 12);
   GuiSetStyle(DEFAULT, BACKGROUND_COLOR, ColorToInt(COLOR_PANEL));
   GuiSetStyle(BUTTON, BASE_COLOR_NORMAL, ColorToInt(COLOR_SURFACE2));
@@ -4548,8 +4523,11 @@ void gui_draw(void) {
   case TAB_SECURITY:
     draw_panel_security(V_WIDTH, V_HEIGHT);
     break;
-  case TAB_TOOLS:
-    draw_panel_tools(V_WIDTH, V_HEIGHT);
+  case TAB_PACKETS:
+    draw_panel_packets(V_WIDTH, V_HEIGHT);
+    break;
+  case TAB_PORTS:
+    draw_panel_ports(V_WIDTH, V_HEIGHT);
     break;
   case TAB_SITE_BLOCK:
     draw_panel_site_block(V_WIDTH, V_HEIGHT);
@@ -4607,7 +4585,7 @@ static void sn_clip(const char *in, char *out, int olen, int maxw, int size) {
   }
 }
 
-/* Alt sekme cubugu — Araçlar ile ayni gorunum. */
+/* Alt sekme cubugu — SENTINEL Kameralar / Izleme. */
 static void sn_subtab_bar(int y0) {
   const char *lbl[] = { "Kameralar", "İzleme" };
   Color clr[] = { COLOR_GREEN, COLOR_ACCENT };
@@ -4818,11 +4796,11 @@ static void sn_draw_watch(int W, int py, int panel_h) {
     int cy = top + row * (cell_h + gap) - (int)g_sn_watch_scroll;
 
     Rectangle cell = {(float)cx, (float)cy, (float)cell_w, (float)cell_h};
-    DrawRoundedPanel(cell, (Color){10, 14, 22, 255}, ui_alpha(COLOR_BORDER, 150));
+    DrawRoundedPanel(cell, COLOR_TERMINAL_BG, ui_alpha(COLOR_BORDER, 150));
 
     Rectangle vid = {(float)(cx + 12), (float)(cy + 12),
                      (float)(cell_w - 24), (float)vid_h};
-    DrawRectangleRounded(vid, 0.04f, 4, (Color){2, 4, 7, 255});
+    DrawRectangleRounded(vid, 0.04f, 4, COLOR_TERMINAL_BG);
     DrawRectangleRoundedLinesEx(vid, 0.04f, 4, 1.0f, ui_alpha(COLOR_BORDER, 160));
 
     if (e->stream_slot >= 0) {
@@ -4912,7 +4890,7 @@ static void draw_panel_sentinel(int W, int H) {
     if (tw > W - 48) tw = W - 48;
     DrawRectangleRounded((Rectangle){(float)(W - tw - 24), (float)(py + panel_h - 26),
                                      (float)tw, 22.0f}, 0.5f, 4,
-                         (Color){12, 20, 32, 235});
+                         (Color){14, 14, 16, 235});
     DrawRectangleRoundedLinesEx(
         (Rectangle){(float)(W - tw - 24), (float)(py + panel_h - 26), (float)tw, 22.0f},
         0.5f, 4, 1.0f, ui_alpha(COLOR_ACCENT, 140));
